@@ -1,0 +1,19 @@
+{
+  "name": "restaurant-whatsapp-ordering-review-system",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/api",
+    "apps/dashboard"
+  ],
+  "scripts": {
+    "dev:api": "npm --workspace apps/api run start:dev",
+    "dev:dashboard": "npm --workspace apps/dashboard run dev",
+    "build": "npm run build:api && npm run build:dashboard",
+    "build:api": "npm --workspace apps/api run build",
+    "build:dashboard": "npm --workspace apps/dashboard run build",
+    "prisma:generate": "npm --workspace apps/api run prisma:generate",
+    "prisma:migrate": "npm --workspace apps/api run prisma:migrate",
+    "prisma:seed": "npm --workspace apps/api run prisma:seed"
+  }
+}

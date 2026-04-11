@@ -1,0 +1,84 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum OrderStatus {
+  PENDING
+  PREPARING
+  READY
+  COMPLETED
+}
+
+enum ReviewConversationState {
+  NONE
+  WAITING_FOR_RATING
+  WAITING_FOR_COMMENT
+}
+
+model AdminUser {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model MenuItem {
+  id          String      @id @default(cuid())
+  name        String      @unique
+  description String
+  price       Decimal     @db.Decimal(10, 2)
+  isAvailable Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  orderItems  OrderItem[]
+  reviews     Review[]
+}
+
+model Order {
+  id                  String                  @id @default(cuid())
+  customerPhone       String
+  totalAmount         Decimal                 @db.Decimal(10, 2)
+  status              OrderStatus             @default(PENDING)
+  paymentLinkId       String?
+  paymentLinkUrl      String?
+  reviewConversation  ReviewConversationState @default(NONE)
+  pendingReviewRating Int?
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+  orderItems          OrderItem[]
+  reviews             Review[]
+
+  @@index([customerPhone, createdAt(sort: Desc)])
+}
+
+model OrderItem {
+  id        String   @id @default(cuid())
+  orderId   String
+  itemId    String
+  quantity  Int      @default(1)
+  unitPrice Decimal  @db.Decimal(10, 2)
+  createdAt DateTime @default(now())
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  item      MenuItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@unique([orderId, itemId])
+}
+
+model Review {
+  id        String   @id @default(cuid())
+  rating    Int
+  comment   String
+  itemId    String
+  orderId   String
+  createdAt DateTime @default(now())
+  item      MenuItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@unique([orderId, itemId])
+}
