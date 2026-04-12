@@ -20,15 +20,53 @@ export type DashboardSummary = {
   completedOrdersCount: number;
   reviewsCount: number;
   averageRating: number;
-  menuCount: number;
+  productCount: number;
 };
 
-export type MenuItem = {
+export type Role = 'SUPER_ADMIN' | 'TENANT_ADMIN';
+
+export type ProductSchemaItem = {
+  name: string;
+  label?: string;
+  type: 'string' | 'number' | 'boolean' | 'select' | 'text';
+  required?: boolean;
+  displayInList?: boolean;
+  options?: string[];
+  icon?: string;          // e.g. 🥦, 🌶️
+  appliesTo?: string[];   // Specific categories this field applies to. Empty = all.
+};
+
+export type Tenant = {
+  id: string;
+  name: string;
+  productSchema: ProductSchemaItem[] | null;
+  categories: string[] | null;
+  whatsappPhoneNumberId?: string;
+  whatsappAccessToken?: string;
+  whatsappVerifyToken?: string;
+  whatsappApiVersion?: string;
+  razorpayKeyId?: string;
+  razorpayKeySecret?: string;
+  openTime?: string;
+  closeTime?: string;
+  timezone?: string;
+  messageTemplates?: Record<string, string>;
+  _count?: {
+    products: number;
+    admins: number;
+  };
+};
+
+export type Product = {
   id: string;
   name: string;
   description: string;
   price: string;
+  category: string;
+  imageUrl?: string;
+  tags?: string[];
   isAvailable: boolean;
+  attributes: Record<string, any> | null;
 };
 
 export type Review = {
@@ -36,7 +74,7 @@ export type Review = {
   rating: number;
   comment: string;
   createdAt: string;
-  item: {
+  product: {
     id: string;
     name: string;
   };
@@ -56,7 +94,7 @@ export type Order = {
   orderItems: Array<{
     id: string;
     quantity: number;
-    item: {
+    product: {
       id: string;
       name: string;
     };

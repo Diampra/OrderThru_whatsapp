@@ -1,25 +1,33 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { AdminModule } from './modules/admin/admin.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
-import { MenuModule } from './modules/menu/menu.module';
+import { ProductModule } from './modules/product/product.module';
 import { OrderModule } from './modules/order/order.module';
 import { PaymentModule } from './modules/payment/payment.module';
 import { PrismaModule } from './modules/prisma/prisma.module';
 import { ReviewModule } from './modules/review/review.module';
+import { TenantModule } from './modules/tenant/tenant.module';
 import { WhatsAppModule } from './modules/whatsapp/whatsapp.module';
+import { EventsModule } from './modules/events/events.module';
+import { UploadModule } from './modules/upload/upload.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     PrismaModule,
     AuthModule,
-    MenuModule,
+    AdminModule,
+    ProductModule,
     PaymentModule,
     OrderModule,
     ReviewModule,
+    TenantModule,
     WhatsAppModule,
     DashboardModule,
+    EventsModule,
+    UploadModule,
   ],
 })
 export class AppModule {}

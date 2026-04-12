@@ -6,7 +6,7 @@ import { PrismaService } from '../prisma/prisma.service';
 export class ReviewService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async createReviewsForOrder(orderId: string, rating: number, comment: string) {
+  async createReviewsForOrder(tenantId: string, orderId: string, rating: number, comment: string) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
       include: {
@@ -15,21 +15,21 @@ export class ReviewService {
       },
     });
 
-    if (!order) {
+    if (!order || order.tenantId !== tenantId) {
       throw new NotFoundException('Order not found');
     }
 
-    const existingItemIds = new Set(order.reviews.map((review: { itemId: string }) => review.itemId));
+    const existingProductIds = new Set(order.reviews.map((review: { productId: string }) => review.productId));
 
     const reviews = await this.prisma.$transaction(
       order.orderItems
-        .filter((orderItem: { itemId: string }) => !existingItemIds.has(orderItem.itemId))
-        .map((orderItem: { itemId: string }) =>
+        .filter((orderItem: { productId: string }) => !existingProductIds.has(orderItem.productId))
+        .map((orderItem: { productId: string }) =>
           this.prisma.review.create({
             data: {
               rating,
               comment,
-              itemId: orderItem.itemId,
+              productId: orderItem.productId,
               orderId,
             },
           }),
@@ -47,9 +47,10 @@ export class ReviewService {
     return reviews;
   }
 
-  async getReviewSummaryByItemName(itemName: string) {
-    const item = await this.prisma.menuItem.findFirst({
+  async getReviewSummaryByItemName(tenantId: string, itemName: string) {
+    const product = await this.prisma.product.findFirst({
       where: {
+        tenantId: tenantId,
         name: {
           equals: itemName.trim(),
           mode: 'insensitive',
@@ -57,35 +58,36 @@ export class ReviewService {
       },
     });
 
-    if (!item) {
-      throw new NotFoundException('Menu item not found');
+    if (!product) {
+      throw new NotFoundException('Product not found');
     }
 
     const [aggregate, latestReviews] = await this.prisma.$transaction([
       this.prisma.review.aggregate({
-        where: { itemId: item.id },
+        where: { productId: product.id },
         _avg: { rating: true },
         _count: { _all: true },
       }),
       this.prisma.review.findMany({
-        where: { itemId: item.id },
+        where: { productId: product.id },
         orderBy: { createdAt: 'desc' },
         take: 3,
       }),
     ]);
 
     return {
-      item,
+      product,
       averageRating: aggregate._avg.rating ?? 0,
       reviewCount: aggregate._count._all,
       latestReviews,
     };
   }
 
-  listDashboardReviews() {
+  listDashboardReviews(tenantId: string) {
     return this.prisma.review.findMany({
+      where: { product: { tenantId: tenantId } },
       include: {
-        item: true,
+        product: true,
         order: true,
       },
       orderBy: { createdAt: 'desc' },

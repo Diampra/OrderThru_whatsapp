@@ -28,6 +28,27 @@ Production-ready MVP for small restaurants to accept WhatsApp orders, collect pa
 Backend default: `http://localhost:4000`
 Dashboard default: `http://localhost:5173`
 
+## Local Development (WhatsApp Webhooks)
+
+To test WhatsApp webhooks locally, you must expose your local backend to the internet. Run the following command in a separate terminal:
+
+```bash
+npx ngrok http 4000
+```
+
+### Configuring Meta WhatsApp Webhook
+
+1.  Copy the forwarding HTTPS URL provided by ngrok (e.g., `https://xxxx-xxxx.ngrok-free.app`).
+2.  Go to your [Meta App Dashboard](https://developers.facebook.com/apps).
+3.  Navigate to **WhatsApp** > **Configuration**.
+4.  Under **Webhook**, click **Edit**.
+5.  **Callback URL**: `[YOUR_NGROK_URL]/whatsapp/webhook/[tenant-id]`
+    - Replace `[tenant-id]` with the ID of the restaurant/tenant you are testing (e.g., `restaurant-tenant`).
+    - Example: `https://xxxx-xxxx.ngrok-free.app/whatsapp/webhook/restaurant-tenant`
+6.  **Verify Token**: Use the value of `WHATSAPP_VERIFY_TOKEN` from your `apps/api/.env` (default: `orderthru_verify_123`).
+7.  Click **Verify and Save**.
+8.  Under **Webhook fields**, click **Manage** and subscribe to `messages`.
+
 ## WhatsApp Commands
 
 - `menu`

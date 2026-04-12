@@ -7,11 +7,28 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum Role {
+  SUPER_ADMIN
+  TENANT_ADMIN
+}
+
 enum OrderStatus {
+  DRAFT
   PENDING
   PREPARING
   READY
   COMPLETED
+}
+
+enum PaymentMethod {
+  COD
+  ONLINE
+  PENDING
+}
+
+enum PaymentConversationState {
+  NONE
+  WAITING_FOR_METHOD
 }
 
 enum ReviewConversationState {
@@ -20,65 +37,145 @@ enum ReviewConversationState {
   WAITING_FOR_COMMENT
 }
 
-model AdminUser {
+model User {
   id           String   @id @default(cuid())
   email        String   @unique
   passwordHash String
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+  
+  profile      Profile?
 }
 
-model MenuItem {
+model Profile {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  role      Role     @default(TENANT_ADMIN)
+  firstName String?
+  lastName  String?
+  phone     String?
+  
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Specific role data
+  superAdmin  SuperAdmin?
+  tenantAdmin TenantAdmin?
+}
+
+model SuperAdmin {
+  id        String   @id @default(cuid())
+  profileId String   @unique
+  profile   Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+}
+
+model TenantAdmin {
+  id        String   @id @default(cuid())
+  profileId String   @unique
+  tenantId  String
+  
+  profile   Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+}
+
+model Tenant {
+  id                    String     @id @default(cuid())
+  name                  String     // e.g. "Acme Corp" or "Joe's Pizza"
+  businessType          String?    // e.g. "RESTAURANT", "CLOTHING"
+  whatsappVerifyToken   String?
+  whatsappPhoneNumberId String?
+  whatsappAccessToken   String?
+  whatsappApiVersion     String?
+  
+  // Tenant-specific payments
+  razorpayKeyId     String?
+  razorpayKeySecret String?
+  
+  // Operations & Customization
+  openTime          String?    // e.g. "09:00"
+  closeTime         String?    // e.g. "22:00"
+  timezone          String?    @default("Asia/Kolkata")
+  messageTemplates  Json?      // Custom bot strings
+  
+  productSchema         Json?      // Definition of custom fields
+  categories            Json?      // Array of category names
+  taxRate               Decimal    @db.Decimal(10, 2) @default(0.05)
+  createdAt             DateTime   @default(now())
+  updatedAt             DateTime   @updatedAt
+  
+  admins                TenantAdmin[]
+  products              Product[]
+  orders                Order[]
+}
+
+model Product {
   id          String      @id @default(cuid())
-  name        String      @unique
+  tenantId    String
+  name        String
   description String
   price       Decimal     @db.Decimal(10, 2)
   isAvailable Boolean     @default(true)
+  category    String      @default("General")
+  imageUrl    String?
+  tags        Json?       // e.g. ["Best Seller", "New"]
+  attributes  Json?       // Actual values for custom fields
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   orderItems  OrderItem[]
   reviews     Review[]
+
+  @@unique([tenantId, name])
 }
 
 model Order {
   id                  String                  @id @default(cuid())
+  tenantId            String
   customerPhone       String
   totalAmount         Decimal                 @db.Decimal(10, 2)
   status              OrderStatus             @default(PENDING)
+  
+  // Payment info
+  paymentMethod       PaymentMethod           @default(PENDING)
   paymentLinkId       String?
   paymentLinkUrl      String?
-  reviewConversation  ReviewConversationState @default(NONE)
+  
+  // Conversational states
+  paymentConversation PaymentConversationState @default(NONE)
+  reviewConversation  ReviewConversationState  @default(NONE)
   pendingReviewRating Int?
+  
   createdAt           DateTime                @default(now())
   updatedAt           DateTime                @updatedAt
+  tenant              Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   orderItems          OrderItem[]
   reviews             Review[]
 
-  @@index([customerPhone, createdAt(sort: Desc)])
+  @@index([tenantId, customerPhone, createdAt(sort: Desc)])
 }
 
 model OrderItem {
   id        String   @id @default(cuid())
   orderId   String
-  itemId    String
+  productId String
   quantity  Int      @default(1)
   unitPrice Decimal  @db.Decimal(10, 2)
+  taxAmount Decimal  @db.Decimal(10, 2) @default(0)
   createdAt DateTime @default(now())
   order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  item      MenuItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
 
-  @@unique([orderId, itemId])
+  @@unique([orderId, productId])
 }
 
 model Review {
   id        String   @id @default(cuid())
   rating    Int
   comment   String
-  itemId    String
+  productId String
   orderId   String
   createdAt DateTime @default(now())
-  item      MenuItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
   order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
-  @@unique([orderId, itemId])
+  @@unique([orderId, productId])
 }

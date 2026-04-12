@@ -5,17 +5,18 @@ import { PrismaService } from '../prisma/prisma.service';
 export class DashboardService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async getSummary() {
-    const [ordersCount, pendingOrdersCount, completedOrdersCount, reviewAggregate, menuCount] =
+  async getSummary(tenantId: string) {
+    const [ordersCount, pendingOrdersCount, completedOrdersCount, reviewAggregate, productCount] =
       await this.prisma.$transaction([
-        this.prisma.order.count(),
-        this.prisma.order.count({ where: { status: 'PENDING' } }),
-        this.prisma.order.count({ where: { status: 'COMPLETED' } }),
+        this.prisma.order.count({ where: { tenantId, status: { not: 'DRAFT' } } }),
+        this.prisma.order.count({ where: { tenantId, status: 'PENDING' } }),
+        this.prisma.order.count({ where: { tenantId, status: 'COMPLETED' } }),
         this.prisma.review.aggregate({
+          where: { product: { tenantId } },
           _avg: { rating: true },
           _count: { _all: true },
         }),
-        this.prisma.menuItem.count(),
+        this.prisma.product.count({ where: { tenantId } }),
       ]);
 
     return {
@@ -24,7 +25,7 @@ export class DashboardService {
       completedOrdersCount,
       reviewsCount: reviewAggregate._count._all,
       averageRating: reviewAggregate._avg.rating ?? 0,
-      menuCount,
+      productCount,
     };
   }
 }
