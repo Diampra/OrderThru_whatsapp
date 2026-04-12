@@ -43,8 +43,8 @@ export class TenantController {
 
     // If TENANT_ADMIN, restrict to safe fields
     if (req.user.role === Role.TENANT_ADMIN) {
-      const { openTime, closeTime, timezone, messageTemplates, categories } = body;
-      return this.tenantService.update(id, { openTime, closeTime, timezone, messageTemplates, categories });
+      const { openTime, closeTime, timezone, messageTemplates, categories, isBotEnabled } = body;
+      return this.tenantService.update(id, { openTime, closeTime, timezone, messageTemplates, categories, isBotEnabled });
     }
 
     return this.tenantService.update(id, body);

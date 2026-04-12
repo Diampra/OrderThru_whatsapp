@@ -8,6 +8,9 @@ import { OrderService } from '../order/order.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ProductService } from '../product/product.service';
 import { ReviewService } from '../review/review.service';
+import { WhatsAppSessionService } from './whatsapp-session.service';
+import { EventsGateway } from '../events/events.gateway';
+import { extractFoodName } from './food-keywords';
 
 @Injectable()
 export class WhatsAppService {
@@ -18,6 +21,8 @@ export class WhatsAppService {
     private readonly prisma: PrismaService,
     private readonly productService: ProductService,
     private readonly reviewService: ReviewService,
+    private readonly sessionService: WhatsAppSessionService,
+    private readonly eventsGateway: EventsGateway,
     @Inject(forwardRef(() => OrderService)) private readonly orderService: OrderService,
   ) {}
 
@@ -38,24 +43,79 @@ export class WhatsAppService {
     const value = payload?.entry?.[0]?.changes?.[0]?.value;
     
     // Ignore status updates (read, delivered, etc.)
-    if (value?.statuses) {
-      this.logger.debug(`Status update for tenant ${tenantId}: ${value.statuses[0]?.status}`);
-      return;
-    }
+    if (value?.statuses) return;
 
     const message = value?.messages?.[0];
-    if (!message || (!message.text?.body && !message.interactive) || !message.from) {
-      this.logger.warn(`Invalid or unsupported message payload: ${JSON.stringify(payload)}`);
+    if (!message || !message.from) return;
+
+    const customerPhone = message.from;
+    
+    // Fetch tenant and check bot toggle
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
+    const isBotEnabled = tenant?.isBotEnabled ?? true;
+
+    // 1. If Bot is OFF, notify staff and exit (Manual Chat Mode)
+    if (!isBotEnabled) {
+      await this.logMessage(tenantId, customerPhone, 'USER', value?.messages?.[0]?.text?.body || '[Interactive/Media]');
+      const reason = `Manual Chat Required: Bot is disabled. New message from ${customerPhone}`;
+      await this.prisma.staffAlert.create({
+        data: { tenantId, customerPhone, reason }
+      });
+      this.eventsGateway.emitStaffNotification(tenantId, customerPhone, reason);
       return;
     }
 
-    const customerPhone = message.from;
-    let rawText = '';
+    const isPaused = await this.sessionService.isPaused(tenantId, customerPhone);
+    const messageType = message.type;
     
-    if (message.type === 'interactive') {
+    let rawText = '';
+    if (messageType === 'interactive') {
       rawText = message.interactive.button_reply?.id || message.interactive.list_reply?.id || '';
-    } else {
+    } else if (messageType === 'text') {
       rawText = message.text.body.trim();
+    }
+
+    // 1. Special Handling: Resume Bot
+    if (rawText === 'RESUME_BOT') {
+      await this.sessionService.resumeBot(tenantId, customerPhone);
+      await this.logMessage(tenantId, customerPhone, 'USER', 'RESUME_BOT');
+      await this.sendTextMessage(tenantId, customerPhone, "Welcome back! 🥘 I'm ready to take your order again.");
+      return;
+    }
+
+    // 2. Pause Handling (Rule #3)
+    if (isPaused) {
+      this.logger.debug(`Bot is paused for ${customerPhone}. Ignoring message.`);
+      return; // Stay silent
+    }
+
+    // Update session interaction time
+    await this.sessionService.updateLastInteraction(tenantId, customerPhone);
+
+    // 3. Media Handling (Rule #2.C)
+    if (messageType === 'image') {
+      return this.escalateToHuman(tenantId, customerPhone, "User sent an image.", 30);
+    }
+
+    if (messageType === 'location') {
+      const loc = message.location;
+      // We could store loc.latitude/loc.longitude in session status
+      const text = "📍 *Location Received*\nWould you like us to deliver your order to this location?";
+      const buttons = [
+        { id: 'CONFIRM_LOCATION', title: 'Yes, Deliver Here ✅' },
+        { id: 'menu', title: 'Change Address 🏠' },
+        { id: 'HUMAN', title: 'Talk to Staff 🧑‍🍳' }
+      ];
+      return this.sendInteractiveButtons(tenantId, customerPhone, text, buttons);
+    }
+
+    if (['audio', 'video', 'document', 'sticker'].includes(messageType)) {
+      const text = "I can't process this type of message yet 😅 Please type your order or use the menu below.";
+      const buttons = [
+        { id: 'menu', title: 'Browse Menu 🍱' },
+        { id: 'HUMAN', title: 'Talk to Staff 🧑‍🍳' }
+      ];
+      return this.sendInteractiveButtons(tenantId, customerPhone, text, buttons);
     }
 
     if (!rawText) return;
@@ -66,9 +126,12 @@ export class WhatsAppService {
     if (!isOpen) {
       const closedMsg = await this.getTemplate(tenantId, 'BUSINESS_CLOSED', 
         "We are currently closed. Please visit us during our working hours!");
+      await this.logMessage(tenantId, customerPhone, 'USER', rawText);
       await this.sendTextMessage(tenantId, customerPhone, closedMsg);
       return;
     }
+
+    await this.logMessage(tenantId, customerPhone, 'USER', rawText);
 
     // Order flow conversation (Step 2: Payment choice)
     const orderFlowResponse = await this.tryHandleOrderConversation(tenantId, customerPhone, rawText);
@@ -91,32 +154,25 @@ export class WhatsAppService {
     const commandResponse = await this.handleCommand(tenantId, customerPhone, rawText);
     if (!commandResponse) return;
 
-    if (typeof commandResponse === 'string') {
-      this.logger.debug(`Sending text response: ${commandResponse}`);
-      // Convert specific text responses to buttons if appropriate
-      if (rawText.toLowerCase().startsWith('order ') && commandResponse.includes('How would you like to pay?')) {
-        await this.sendInteractiveButtons(tenantId, customerPhone, commandResponse, [
-          { id: '1', title: 'Pay Online' },
-          { id: '2', title: 'COD' }
-        ]);
-      } else {
-        await this.sendTextMessage(tenantId, customerPhone, commandResponse);
-      }
-    } else if (commandResponse.type === 'list') {
-      const cr = commandResponse as any;
-      this.logger.debug(`Sending list message with ${cr.sections?.length} sections`);
+    // Wrap all responses to ensure no dead-ends
+    const finalResponse = await this.wrapResponse(tenantId, customerPhone, commandResponse);
+
+    if (typeof finalResponse === 'string') {
+      this.logger.debug(`Sending text response: ${finalResponse}`);
+      await this.sendTextMessage(tenantId, customerPhone, finalResponse);
+    } else if (finalResponse.type === 'list') {
+      const cr = finalResponse as any;
       await this.sendListMessage(
         tenantId, 
         customerPhone, 
-        cr.body || "Please select an item to view details:",
-        cr.buttonLabel || "View Products",
+        cr.body || "Please select:",
+        cr.buttonLabel || "View Options",
         cr.sections || [],
         cr.header,
         cr.footer
       );
-    } else if (commandResponse.type === 'buttons') {
-       const cr = commandResponse as any;
-       this.logger.debug(`Sending button message with ${cr.buttons?.length} buttons`);
+    } else if (finalResponse.type === 'buttons') {
+       const cr = finalResponse as any;
        await this.sendInteractiveButtons(
          tenantId, 
          customerPhone, 
@@ -126,6 +182,61 @@ export class WhatsAppService {
          cr.footer
        );
     }
+  }
+
+  async escalateToHuman(tenantId: string, phone: string, reason: string, pauseMinutes = 60) {
+    await this.sessionService.pauseBot(tenantId, phone, pauseMinutes);
+    
+    // Persist alert to DB
+    await this.prisma.staffAlert.create({
+      data: { tenantId, customerPhone: phone, reason }
+    });
+
+    // Notify Dashboard via WebSocket
+    this.eventsGateway.emitStaffNotification(tenantId, phone, reason);
+
+    const text = `Got it. Our team will contact you on this number within ${pauseMinutes} minutes 👍\n\nI'll stay quiet until then, or you can click "Resume Bot" to talk to me again.`;
+    const buttons = [
+      { id: 'VIEW_CART', title: 'View Cart 🛒' },
+      { id: 'menu', title: 'Main Menu 🍱' },
+      { id: 'RESUME_BOT', title: 'Resume Bot 🤖' }
+    ];
+
+    return this.sendInteractiveButtons(tenantId, phone, text, buttons);
+  }
+
+  /**
+   * Universal response wrapper to ensure No Dead-Ends (Rule #1).
+   * Appends [Browse Menu] [View Cart] [Talk to Staff] if space permits.
+   */
+  private async wrapResponse(tenantId: string, phone: string, response: any): Promise<any> {
+    if (typeof response === 'string') {
+      return {
+        type: 'buttons',
+        text: response,
+        buttons: [
+          { id: 'menu', title: 'Browse Menu 🍱' },
+          { id: 'VIEW_CART', title: 'View Cart 🛒' },
+          { id: 'HUMAN', title: 'Talk to Staff 🧑‍🍳' }
+        ]
+      };
+    }
+
+    if (response.type === 'buttons') {
+      const buttons = response.buttons || [];
+      if (buttons.length < 3) {
+        if (!buttons.find((b: any) => b.id === 'menu')) buttons.push({ id: 'menu', title: 'Main Menu 🍱' });
+      }
+      if (buttons.length < 3) {
+        if (!buttons.find((b: any) => b.id === 'VIEW_CART')) buttons.push({ id: 'VIEW_CART', title: 'View Cart 🛒' });
+      }
+      if (buttons.length < 3) {
+         if (!buttons.find((b: any) => b.id === 'HUMAN')) buttons.push({ id: 'HUMAN', title: 'Talk to Staff 🧑‍🍳' });
+      }
+      response.buttons = buttons.slice(0, 3);
+    }
+
+    return response;
   }
 
   async isBusinessOpen(tenantId: string): Promise<boolean> {
@@ -159,329 +270,218 @@ export class WhatsAppService {
 
   async handleCommand(tenantId: string, customerPhone: string, rawText: string) {
     const lowerText = rawText.trim().toLowerCase();
+    let response: any = null;
 
-    // 1. Direct Action Commands (Stateless Button IDs)
+    // 1. A. Direct Action Button IDs (Rule #2.A)
     if (lowerText.startsWith('order_')) {
       const productId = rawText.slice(6);
       const cartStatus = await this.orderService.addToCart(tenantId, customerPhone, productId);
-      return this.buildAddedToCartMessage(cartStatus);
+      response = await this.buildAddedToCartMessage(cartStatus);
     }
-
-    if (lowerText === 'view_cart' || lowerText === 'cart') {
+    else if (lowerText === 'view_cart' || lowerText === 'cart' || lowerText === 'basket') {
       const cart = await this.orderService.getDetailedCart(tenantId, customerPhone);
       if (!cart || cart.items.length === 0) {
-        return "Your cart is currently empty. Send 'menu' to see our delicious items!";
+        response = {
+          type: 'buttons',
+          text: "Your cart is empty. Send 'menu' to see our delicious items!",
+          buttons: [{ id: 'menu', title: 'Browse Menu 🍱' }]
+        };
+      } else {
+        response = await this.buildCartListMessage(cart);
       }
-      return this.buildCartListMessage(cart);
     }
 
-    if (lowerText.startsWith('edit_')) {
+    else if (lowerText.startsWith('edit_')) {
       const productId = rawText.slice(5);
       const cart = await this.orderService.getDetailedCart(tenantId, customerPhone);
       const item = (cart?.items || []).find(i => i.productId === productId);
-      if (!item) return "Item not found in cart.";
-      return this.buildEditItemMessage(item);
+      response = item ? await this.buildEditItemMessage(item) : "Item not found in cart.";
     }
-
-    if (lowerText.startsWith('qty_inc_')) {
+    else if (lowerText.startsWith('qty_inc_')) {
       const productId = rawText.slice(8);
       await this.orderService.incrementItemQty(tenantId, customerPhone, productId);
       const cart = await this.orderService.getDetailedCart(tenantId, customerPhone);
       const item = (cart?.items || []).find(i => i.productId === productId);
-      if (!item) return this.buildCartListMessage(cart); 
-      return this.buildEditItemMessage(item);
+      response = item ? await this.buildEditItemMessage(item) : await this.buildCartListMessage(cart);
     }
-
-    if (lowerText.startsWith('qty_dec_')) {
+    else if (lowerText.startsWith('qty_dec_')) {
       const productId = rawText.slice(8);
       await this.orderService.decrementItemQty(tenantId, customerPhone, productId);
       const cart = await this.orderService.getDetailedCart(tenantId, customerPhone);
       const item = (cart?.items || []).find(i => i.productId === productId);
-      if (!item) return this.buildCartListMessage(cart);
-      return this.buildEditItemMessage(item);
+      response = item ? await this.buildEditItemMessage(item) : await this.buildCartListMessage(cart);
     }
-
-    if (lowerText.startsWith('remove_')) {
+    else if (lowerText.startsWith('remove_')) {
       const productId = rawText.slice(7);
       await this.orderService.removeItemFromCart(tenantId, customerPhone, productId);
       const cart = await this.orderService.getDetailedCart(tenantId, customerPhone);
-      if (!cart || cart.items.length === 0) return "Item removed. Your cart is now empty.";
-      return this.buildCartListMessage(cart);
+      response = (!cart || cart.items.length === 0) ? "Item removed. Your cart is now empty." : await this.buildCartListMessage(cart);
     }
-
-    if (lowerText === 'empty_cart' || lowerText === 'clear_cart') {
+    else if (['empty_cart', 'clear_cart', 'cancel', 'clear', 'empty'].includes(lowerText)) {
       await this.orderService.clearCart(tenantId, customerPhone);
-      return "🗑️ Your cart has been cleared. Send 'menu' to start again!";
+      response = "🗑️ Your cart has been cleared. Send 'menu' to start again!";
     }
-
-    if (lowerText === 'help') {
-      return this.getTemplate(tenantId, 'HELP_TEXT', 
-        ['Commands:', 'menu', 'order <item>', 'status', 'reviews <item>', 'help'].join('\n'));
+    else if (['human', 'staff', 'agent', 'call', 'talk', 'speak', 'help', 'HUMAN'].includes(lowerText)) {
+      return this.escalateToHuman(tenantId, customerPhone, "User requested human help.");
     }
-
-    if (lowerText === 'menu') {
-      const products = (await this.productService.listAvailable(tenantId)) as any[];
-      if (!products.length) {
-        return this.getTemplate(tenantId, 'MENU_EMPTY', 'No products are available right now.');
-      }
-
-      // Get tenant's defined categories
-      const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
-      const categories = (tenant?.categories as string[]) || [];
-
-      // If no categories defined, fallback to old "All Products" list but grouped
-      if (categories.length === 0) {
-        const categoriesMap = new Map<string, any[]>();
-        products.forEach(p => {
-          const cat = p.category || 'General';
-          if (!categoriesMap.has(cat)) categoriesMap.set(cat, []);
-          categoriesMap.get(cat)?.push(p);
-        });
-
-        const schema = (tenant?.productSchema as any[]) || [];
-        const sections: any[] = [];
-        let totalRows = 0;
-
-        const cart = await this.orderService.getDetailedCart(tenantId, customerPhone);
-        if (cart && cart.items.length > 0) {
-          sections.push({
-            title: '🛒 Current Cart',
-            rows: [
-              { id: 'VIEW_CART', title: 'View / Edit Cart', description: `${cart.count} items - ${formatInr(cart.total)}` },
-              { id: 'CHECKOUT', title: 'Proceed to Checkout 💳', description: 'Finalize your order and pay' }
-            ]
-          });
-          totalRows += 2;
-        }
-
-        const entries = Array.from(categoriesMap.entries());
-        for (const [catName, items] of entries) {
-          if (totalRows >= 10) break;
-          
-          const availableSlots = 10 - totalRows;
-          const rowsInThisSection = items.slice(0, Math.min(availableSlots, 10)).map(p => {
-            let prefix = '';
-            if (p.attributes) {
-              const attrs = p.attributes as any;
-              schema.filter((f: any) => f.icon && attrs[f.name] === true).forEach((f: any) => {
-                prefix += f.icon + ' ';
-              });
-            }
-            const bestSeller = p.tags && Array.isArray(p.tags) && p.tags.includes('Best Seller') ? '⭐ ' : '';
-            return {
-              id: `PROD_${p.id}`,
-              title: (bestSeller + prefix + p.name).slice(0, 24),
-              description: `${formatInr(Number(p.price))} - ${p.description || ''}`.slice(0, 72)
-            };
-          });
-
-          if (rowsInThisSection.length > 0) {
-            sections.push({
-              title: catName.slice(0, 24),
-              rows: rowsInThisSection
-            });
-            totalRows += rowsInThisSection.length;
-          }
-        }
-
-        return {
-          type: 'list',
-          body: 'Explore our catalog and add items to your cart.',
-          buttonLabel: 'View Products',
-          sections
-        };
-      }
-
-      // Category Explorer Mode
-      const cart = await this.orderService.getDetailedCart(tenantId, customerPhone);
-      const cartRows = [];
-      if (cart && cart.items.length > 0) {
-        cartRows.push(
-          { id: 'VIEW_CART', title: 'View / Edit Cart', description: `${cart.count} items - ${formatInr(cart.total)}` },
-          { id: 'CHECKOUT', title: 'Proceed to Checkout 💳' }
-        );
-      }
-
-      const availableRowsForCategories = 10 - cartRows.length;
-      const categoryRows = categories
-        .map(cat => {
-          const count = products.filter(p => p.category === cat).length;
-          return { cat, count };
-        })
-        .filter(item => item.count > 0);
-
-      // Add "General" if there are products with no defined category
-      const generalCount = products.filter(p => !categories.includes(p.category)).length;
-      if (generalCount > 0) {
-        categoryRows.push({ cat: 'General', count: generalCount });
-      }
-
-      const slicedCategoryRows = categoryRows
-        .slice(0, availableRowsForCategories)
-        .map(item => ({
-          id: `CAT_${item.cat}`,
-          title: item.cat.slice(0, 24),
-          description: `Explore ${item.count} items in ${item.cat}`.slice(0, 72)
-        }));
-
-      const finalSections = [];
-      if (cartRows.length > 0) {
-        finalSections.push({ title: '🛒 Current Cart'.slice(0, 24), rows: cartRows });
-      }
-      if (slicedCategoryRows.length > 0) {
-        finalSections.push({ title: 'Categories'.slice(0, 24), rows: slicedCategoryRows });
-      }
-
-      return {
-        type: 'list',
-        header: '🍱 *Menu Explorer*',
-        body: 'Select a category to explore our current offerings.',
-        footer: 'Powered by OrderThru',
-        buttonLabel: 'Explore Menu',
-        sections: finalSections
-      };
+    else if (['menu', 'start', 'hi', 'hello', 'MAIN_MENU'].includes(lowerText)) {
+      response = await this.showMainMenu(tenantId, customerPhone);
     }
-
-    // Handle Category selection (CAT_<name>)
-    if (lowerText.startsWith('cat_')) {
+    else if (lowerText.startsWith('cat_')) {
       const catName = rawText.slice(4);
-      const products = await this.productService.listAvailable(tenantId);
-      const filtered = (products as any[]).filter(p => (catName === 'General' ? !p.category : p.category === catName));
-
-      if (filtered.length === 0) {
-        return `No items found in ${catName}. Send 'menu' to see other categories.`;
-      }
-
-      // Optimization: If only one item, show it directly!
-      if (filtered.length === 1) {
-        return this.showProductDetails(tenantId, filtered[0]);
-      }
-
-      const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
-      const schema = (tenant?.productSchema as any[]) || [];
-
-      const rows = filtered.slice(0, 10).map(p => {
-        let prefix = '';
-        if (p.attributes) {
-          const attrs = p.attributes as any;
-          schema.filter((f: any) => f.icon && attrs[f.name] === true).forEach((f: any) => {
-            prefix += f.icon + ' ';
-          });
-        }
-        return {
-          id: `PROD_${p.id}`,
-          title: (prefix + p.name).slice(0, 24),
-          description: `${formatInr(Number(p.price))} - ${p.description || ''}`.slice(0, 72)
-        };
-      });
-
-      return {
-        type: 'list',
-        header: `📂 *${catName}*`,
-        body: `Select an item from the ${catName} category.`,
-        footer: 'Click to view details and add to cart',
-        buttonLabel: 'Select Item',
-        sections: [{ title: catName.slice(0, 24), rows }]
-      };
+      response = await this.showCategoryProducts(tenantId, catName);
     }
-
-    // Handle interactive product selection (PROD_<id>)
-    if (lowerText.startsWith('prod_')) {
+    else if (lowerText.startsWith('prod_')) {
       const productId = rawText.slice(5);
       const product = await this.prisma.product.findUnique({ where: { id: productId } });
-      if (product) {
-        return this.showProductDetails(tenantId, product);
-      }
+      response = product ? await this.showProductDetails(tenantId, product) : "Product not found.";
+    }
+    else if (lowerText === 'checkout') {
+      response = await this.handleCheckout(tenantId, customerPhone);
+    }
+    else if (lowerText === 'status') {
+      response = await this.handleStatusCheck(tenantId, customerPhone);
+    }
+    else if (lowerText === 'call_restaurant') {
+      response = await this.handleCallRestaurant(tenantId, customerPhone);
+    }
+    else if (lowerText.startsWith('reviews ')) {
+      response = await this.handleReviewSummary(tenantId, rawText.slice(8).trim());
     }
 
-    // Handle "order <items...>" or bulk direct strings
-    if (lowerText.startsWith('order ') || /^\d+\s+/i.test(lowerText) || lowerText.includes(',')) {
-      const orderContent = lowerText.startsWith('order ') ? rawText.slice(6) : rawText;
-      const parsedItems = this.parseBulkOrderText(orderContent);
-
-      if (parsedItems.length > 0) {
-        const { cart, results, errors } = await this.orderService.bulkAddToCart(tenantId, customerPhone, parsedItems);
-        
-        let response = `🛒 *Bulk Order Processed!*\n\n`;
-        if (results.length > 0) {
-          response += `*Added to Cart:*\n${results.map(r => `• ${r}`).join('\n')}\n\n`;
-        }
-        
-        if (errors.length > 0) {
-          response += `⚠️ *Not Found* (check spelling):\n${errors.map(e => `• ${e}`).join('\n')}\n\n`;
-        }
-
-        const totalItems = (cart.orderItems as any[]).reduce((acc, item) => acc + item.quantity, 0);
-        response += `*Total Items:* ${totalItems}\n*Total Amount:* ${formatInr(Number(cart.totalAmount))}\n\nWhat would you like to do next?`;
-
-        return {
-          type: 'buttons',
-          text: response,
-          buttons: [
-            { id: 'CHECKOUT', title: 'Checkout 💳' },
-            { id: 'VIEW_CART', title: 'View Cart 🛒' },
-            { id: 'menu', title: 'Add More ➕' }
-          ]
-        };
-      }
+    // 2. Fallback Logic: Try Product Search before giving up (Rule #2B)
+    if (!response) {
+      response = await this.handleProductSearch(tenantId, customerPhone, rawText);
+      if (response === null) return null;
     }
 
-    if (lowerText === 'status') {
-      const order = await this.orderService.getLatestOrderForCustomer(tenantId, customerPhone);
-      return this.getTemplate(tenantId, 'ORDER_STATUS',
-        [
-          `Latest order: {{id}}`,
-          `Status: {{status}}`,
-          `Total: {{total}}`,
-        ].join('\n'), {
-          id: order.id,
-          status: order.status,
-          total: formatInr(Number(order.totalAmount))
+    // 3. Last Resort Fallback Logic (Rule #2.D)
+    if (!response || (typeof response === 'string' && response.includes('not sure'))) {
+      const count = await this.sessionService.incrementFallback(tenantId, customerPhone);
+      if (count >= 2) {
+        return this.escalateToHuman(tenantId, customerPhone, `Bot failed to understand user after 2 attempts. Last message: "${rawText}"`);
+      }
+      
+      const fallback = response || "I didn't quite get that 😅 Here’s what you can do:";
+      return this.handleDelayedFallback(tenantId, customerPhone, rawText, fallback);
+    } else {
+      await this.sessionService.resetFallbacks(tenantId, customerPhone);
+    }
+
+    return response;
+  }
+
+  /**
+   * Delayed fallback logic for unusual messages.
+   * Ensures staff has a chance to reply before the bot sends a default "I don't know" message.
+   */
+  private async handleDelayedFallback(tenantId: string, customerPhone: string, rawText: string, fallbackResponse: any) {
+    const timestamp = new Date();
+    const reason = `Unusual message from ${customerPhone}: "${rawText}"`;
+
+    // 1. Alert Staff Immediately
+    await this.prisma.staffAlert.create({
+      data: { tenantId, customerPhone, reason }
+    });
+    this.eventsGateway.emitStaffNotification(tenantId, customerPhone, reason);
+
+    // 2. Schedule Bot Response (60s delay)
+    setTimeout(async () => {
+      try {
+        // Check if bot is still enabled
+        const currentTenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
+        if (!currentTenant?.isBotEnabled) return;
+
+        // Check for manual staff messages sent AFTER the trigger message
+        const staffReply = await this.prisma.chatMessage.findFirst({
+          where: {
+            tenantId,
+            customerPhone,
+            sender: 'STAFF',
+            createdAt: { gte: timestamp }
+          }
         });
-    }
 
-    if (lowerText.startsWith('reviews ')) {
-      const itemName = rawText.slice(8).trim();
-      const summary = await this.reviewService.getReviewSummaryByItemName(tenantId, itemName);
-      if (!summary.reviewCount) {
-        return `No reviews yet for ${summary.product.name}.`;
+        // If no staff reply within the minute, let the bot send the fallback
+        if (!staffReply) {
+          if (typeof fallbackResponse === 'string') {
+            await this.sendTextMessage(tenantId, customerPhone, fallbackResponse);
+          } else if (fallbackResponse.type === 'buttons') {
+            await this.sendInteractiveButtons(tenantId, customerPhone, fallbackResponse.text, fallbackResponse.buttons);
+          } else if (fallbackResponse.type === 'list') {
+            await this.sendListMessage(tenantId, customerPhone, fallbackResponse.body, fallbackResponse.buttonLabel, fallbackResponse.sections);
+          }
+        }
+      } catch (err: any) {
+        this.logger.error(`Error in delayed fallback: ${err.message}`);
       }
+    }, 60000);
 
-      const reviewLines = summary.latestReviews.map((review: { rating: number; comment: string }) => {
-        return `${review.rating}/5 - ${review.comment}`;
-      });
+    return null; // Suppress immediate bot response
+  }
 
-      return [
-        `${summary.product.name}`,
-        `Average rating: ${summary.averageRating.toFixed(1)}/5`,
-        'Latest reviews:',
-        ...reviewLines,
-      ].join('\n');
+  // --- Helper methods for modular handleCommand ---
+  private async showMainMenu(tenantId: string, customerPhone: string) {
+    const products = (await this.productService.listAvailable(tenantId)) as any[];
+    if (!products.length) {
+      return this.getTemplate(tenantId, 'MENU_EMPTY', 'No products are available right now.');
     }
 
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
+    let categories: string[] = (tenant?.categories as string[]) || [];
 
-    if (lowerText === 'checkout') {
-      const order = await this.orderService.finalizeOrder(tenantId, customerPhone);
-      const prompt = await this.getTemplate(tenantId, 'ORDER_PAYMENT_PROMPT', 
-        [
-          `Great! Your order #${order.id.slice(-6).toUpperCase()} is ready.`,
-          `Total: ${formatInr(Number(order.totalAmount))}`,
-          '',
-          'How would you like to pay?',
-        ].join('\n'), { itemName: 'your order' });
-
-      return {
-        type: 'buttons',
-        text: prompt,
-        buttons: [
-          { id: '1', title: 'Pay Online' },
-          { id: '2', title: 'COD' }
-        ]
-      };
+    // Fallback: If tenant has no categories or they don't match products, infer from products
+    if (!categories.length || categories.every(cat => products.filter(p => p.category === cat).length === 0)) {
+      categories = [...new Set(products.map(p => p.category || 'General'))] as string[];
     }
 
+    // 1. Unified Cart Summary (Rule #9.2)
+    const cart = await this.orderService.getDetailedCart(tenantId, customerPhone);
+    const cartRows = [];
+    if (cart && cart.items.length > 0) {
+      cartRows.push(
+        { id: 'VIEW_CART', title: '🛒 View Cart Items'.slice(0, 24), description: `${cart.count} items | ${formatInr(cart.total)}`.slice(0, 72) },
+        { id: 'CHECKOUT', title: '💳 Proceed to Checkout'.slice(0, 24), description: 'Finalize your order'.slice(0, 72) }
+      );
+    }
 
-    return 'Unknown command. Send "help" to see supported commands.';
+    // 2. Category / Product Listing
+    const availableRows = 10 - cartRows.length;
+    const entries = categories
+      .map(cat => ({ id: `CAT_${cat}`, title: cat.slice(0, 24), description: `Explore ${products.filter(p => p.category === cat).length} items`.slice(0, 72) }))
+      .filter(item => !item.description.includes('0 items')) // Only show non-empty cats
+      .slice(0, availableRows);
+
+    const finalSections = [];
+    if (cartRows.length > 0) finalSections.push({ title: 'Current Cart', rows: cartRows });
+    if (entries.length > 0) finalSections.push({ title: 'Categories', rows: entries });
+
+    return {
+      type: 'list',
+      header: '🍱 *Menu Explorer*',
+      body: 'Select a category or proceed to checkout.',
+      buttonLabel: 'Explore Menu',
+      sections: finalSections
+    };
+  }
+
+  private async showCategoryProducts(tenantId: string, catName: string) {
+    const products = await this.productService.listAvailable(tenantId);
+    const filtered = (products as any[]).filter(p => (catName === 'General' ? !p.category : p.category === catName));
+
+    const rows = filtered.slice(0, 10).map(p => ({
+      id: `PROD_${p.id}`,
+      title: p.name.slice(0, 24),
+      description: `${formatInr(Number(p.price))} - ${p.description || ''}`.slice(0, 72)
+    }));
+
+    return {
+      type: 'list',
+      header: `📂 *${catName}*`,
+      body: `Items in ${catName}:`,
+      buttonLabel: 'Select Item',
+      sections: [{ title: catName.slice(0, 24), rows }]
+    };
   }
 
   async showProductDetails(tenantId: string, product: any) {
@@ -497,7 +497,6 @@ export class WhatsAppService {
         .filter((f: any) => {
           const applies = !f.appliesTo || f.appliesTo.length === 0 || f.appliesTo.includes(product.category);
           const val = (product.attributes as any)[f.name];
-          if (f.type === 'number' && val === 0) return false;
           return applies && val !== undefined && val !== null && val !== '';
         })
         .map((f: any) => {
@@ -506,10 +505,7 @@ export class WhatsAppService {
           if (f.type === 'number' && f.options && Array.isArray(f.options)) {
             displayVal = f.options[val] || val;
           }
-          let iconPrefix = f.icon ? f.icon + ' ' : '';
-          if (f.icon === '🌶️' && f.type === 'number' && typeof val === 'number') {
-            iconPrefix = '🌶️'.repeat(val) + ' ';
-          }
+          const iconPrefix = f.icon ? f.icon + ' ' : '';
           return `${iconPrefix}${f.label || f.name}: ${displayVal}`;
         });
 
@@ -518,52 +514,194 @@ export class WhatsAppService {
       }
     }
 
-    if (product.tags && Array.isArray(product.tags) && product.tags.length > 0) {
-      responseText += `\n\n🔖 Tags: ${product.tags.join(', ')}`;
-    }
-
     return {
       type: 'buttons',
       text: responseText,
       buttons: [
         { id: `ORDER_${product.id}`, title: 'Add to Cart ➕' },
         { id: 'VIEW_CART', title: 'View Cart 🛒' },
-        { id: 'menu', title: 'Back to Menu' }
+        { id: 'menu', title: 'Main Menu  Bento' }
+      ].map((b: { id: string, title: string }) => ({ ...b, title: b.title.slice(0, 20) }))
+    };
+  }
+
+  private async handleCheckout(tenantId: string, customerPhone: string) {
+    const order = await this.orderService.finalizeOrder(tenantId, customerPhone);
+    const prompt = await this.getTemplate(tenantId, 'ORDER_PAYMENT_PROMPT', 
+      [`Great! Your order #${order.id.slice(-6).toUpperCase()} is ready.`, `Total: ${formatInr(Number(order.totalAmount))}`, '', 'How would you like to pay?'].join('\n'));
+
+    return {
+      type: 'buttons',
+      text: prompt,
+      buttons: [
+        { id: '1', title: 'Pay Online 💳' }, 
+        { id: '2', title: 'COD 💵' }
       ]
     };
   }
 
-  private parseBulkOrderText(text: string): { name: string; quantity: number }[] {
-    const items: { name: string; quantity: number }[] = [];
-    
-    // Split by common delimiters like comma, newline, or semicolon
-    const segments = text.split(/,|\n|;/);
-    
-    for (const segment of segments) {
-      const trimmed = segment.trim();
-      if (!trimmed) continue;
+  private async handleStatusCheck(tenantId: string, customerPhone: string) {
+    const order = await this.orderService.getLatestOrderForCustomer(tenantId, customerPhone);
+    return this.getTemplate(tenantId, 'ORDER_STATUS',
+      [`Latest order: {{id}}`, `Status: {{status}}`, `Total: {{total}}`].join('\n'), 
+      { id: order.id, status: order.status, total: formatInr(Number(order.totalAmount)) });
+  }
 
-      // Pattern 1: "2 Coffee" or "2x Coffee"
-      const match1 = trimmed.match(/^(\d+)\s*(?:x|X)?\s*(.+)$/);
-      if (match1) {
-        items.push({ quantity: parseInt(match1[1], 10), name: match1[2].trim() });
-        continue;
-      }
+  private async handleReviewSummary(tenantId: string, itemName: string) {
+    const summary = await this.reviewService.getReviewSummaryByItemName(tenantId, itemName);
+    if (!summary.reviewCount) return `No reviews yet for ${summary.product.name}.`;
 
-      // Pattern 2: "Coffee x2" or "Coffee 2"
-      const match2 = trimmed.match(/^(.+?)\s*(?:x|X)?\s*(\d+)$/);
-      if (match2) {
-        items.push({ quantity: parseInt(match2[2], 10), name: match2[1].trim() });
-        continue;
-      }
+    return [
+      `*${summary.product.name}*`,
+      `Avg Rating: ${summary.averageRating.toFixed(1)}/5`,
+      'Latest reviews:',
+      ...summary.latestReviews.map((r: any) => `${r.rating}/5 - ${r.comment}`),
+    ].join('\n');
+  }
 
-      // Pattern 3: Just "Coffee" (assume 1)
-      if (trimmed.length > 2) {
-        items.push({ quantity: 1, name: trimmed });
-      }
+  private async buildBulkOrderResponse(result: any) {
+    const { cart, results, errors } = result;
+    let response = `🛒 *Bulk Order Processed!*\n\n`;
+    if (results.length > 0) response += `*Added to Cart:*\n${results.map((r: any) => `• ${r}`).join('\n')}\n\n`;
+    if (errors.length > 0) response += `⚠️ *Not Found*:\n${errors.map((e: any) => `• ${e}`).join('\n')}\n\n`;
+
+    const totalItems = (cart.orderItems as any[]).reduce((acc: number, item: any) => acc + item.quantity, 0);
+    response += `*Total Items:* ${totalItems}\n*Total Amount:* ${formatInr(Number(cart.totalAmount))}`;
+
+    return {
+      type: 'buttons',
+      text: response,
+      buttons: [
+        { id: 'CHECKOUT', title: 'Checkout 💳' },
+        { id: 'VIEW_CART', title: 'View Cart 🛒' },
+        { id: 'menu', title: 'Add More ➕' }
+      ]
+    };
+  }
+
+  private parseSearchInput(text: string): { quantity: number; itemName: string } {
+    const wordNumbers: any = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+
+    // Step 1: Check for leading quantity word/number  ("2 pizza", "two pizza")
+    const withQty = text.trim().match(/^(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(.+)$/i);
+    if (withQty) {
+      const qtyStr = withQty[1].toLowerCase();
+      const quantity = wordNumbers[qtyStr] || parseInt(qtyStr, 10) || 1;
+      const rawItem = withQty[2].trim();
+      // Still run keyword extraction on the item part
+      const itemName = extractFoodName(rawItem);
+      return { quantity, itemName };
     }
+
+    // Step 2: Check for trailing quantity ("pizza 2")
+    const trailingQty = text.trim().match(/^(.+?)\s+(\d+)$/i);
+    if (trailingQty) {
+      const itemName = extractFoodName(trailingQty[1].trim());
+      return { quantity: parseInt(trailingQty[2], 10), itemName };
+    }
+
+    // Step 3: Just a food phrase ("biryani hai kya", "pizza please")
+    const itemName = extractFoodName(text.trim());
+    return { quantity: 1, itemName };
+  }
+
+  private async handleProductSearch(tenantId: string, customerPhone: string, rawText: string) {
+    const { quantity, itemName } = this.parseSearchInput(rawText);
     
-    return items;
+    if (!itemName || itemName.length < 2) {
+      const fallback = "I'm not sure what you're looking for 😅 Send 'menu' to browse everything!";
+      return this.handleDelayedFallback(tenantId, customerPhone, rawText, fallback);
+    }
+
+    const results = await this.orderService.searchProducts(tenantId, itemName);
+
+    // EXACT MATCH 1 RESULT (Rule 2B Step 3.A)
+    // High similarity (> 0.8) or exact name match
+    if (results.length === 1 || (results.length > 0 && results[0].similarity > 0.8)) {
+      const product = results[0];
+      await this.orderService.addToCart(tenantId, customerPhone, product.id, quantity);
+      
+      return {
+        type: 'buttons',
+        text: `✅ Added: ${quantity}x ${product.name} - ${formatInr(Number(product.price) * quantity)}`,
+        buttons: [
+          { id: 'menu', title: '➕ Add More' },
+          { id: 'VIEW_CART', title: '🛒 View Cart' },
+          { id: 'checkout', title: 'Checkout 💳' }
+        ]
+      };
+    }
+
+    // MULTIPLE MATCHES 2-3 RESULTS (Rule 2B Step 3.B)
+    if (results.length >= 2) {
+      const sections = [{
+        title: `Search: "${itemName}"`,
+        rows: results.slice(0, 8).map(p => ({
+          id: `PROD_${p.id}`,
+          title: p.name.slice(0, 24),
+          description: formatInr(Number(p.price))
+        }))
+      }];
+
+      // Reserved rows for Call/Staff (Rule 2C)
+      sections[0].rows.push({ id: 'CALL_RESTAURANT', title: '📞 Call Restaurant', description: 'Talk to us directly' });
+      sections[0].rows.push({ id: 'HUMAN', title: '🙋 Talk to Staff', description: 'Ask us anything' });
+
+      return {
+        type: 'list',
+        header: 'Matches Found',
+        body: `I found ${results.length} items for "${itemName}". Which one did you mean?`,
+        footer: 'Select an item to view details',
+        buttonLabel: 'View Matches',
+        sections
+      };
+    }
+
+    // Log the clean extracted name (not the raw conversational text)
+    await this.prisma.unknownIntentLog.create({
+      data: {
+        tenantId,
+        customerPhone,
+        query: itemName,   // clean name e.g. "biryani" not "biryani hai kya"
+        tag: 'PRODUCT_NOT_FOUND'
+      }
+    });
+
+    const displayName = itemName
+      .split(' ')
+      .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ');
+
+    const fallback = {
+      type: 'buttons',
+      text: `Sorry, we don't have *${displayName}* on our menu 😅\n\nCan I help you with something else?`,
+      buttons: [
+        { id: 'CALL_RESTAURANT', title: '📞 Call Restaurant' },
+        { id: 'menu', title: '🍱 Browse Menu' },
+        { id: 'HUMAN', title: '🧑‍🍳 Talk to Staff' }
+      ]
+    };
+
+    return this.handleDelayedFallback(tenantId, customerPhone, rawText, fallback);
+  }
+
+  private async handleCallRestaurant(tenantId: string, customerPhone: string) {
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
+    if (!tenant?.phone) {
+      return "I'm sorry, we don't have a contact phone listed yet. Please try 'Talk to Staff' instead.";
+    }
+
+    const reason = "Customer tapped 'Call Restaurant' - ready to call: " + tenant.phone;
+
+    // Persist alert to DB
+    await this.prisma.staffAlert.create({
+      data: { tenantId, customerPhone, reason }
+    });
+
+    // Notify Dashboard via WebSocket
+    this.eventsGateway.emitStaffNotification(tenantId, customerPhone, reason);
+
+    return `Tap to call us directly: tel:${tenant.phone}\n\nWhatsApp will open your dialer automatically!`;
   }
 
   async tryHandleOrderConversation(tenantId: string, customerPhone: string, rawText: string) {
@@ -689,6 +827,7 @@ export class WhatsAppService {
         },
       );
       this.logger.log(`Interactive buttons sent to ${to}`);
+      await this.logMessage(tenantId, to, 'BOT', bodyText);
     } catch (error: any) {
       this.logger.error(`Failed to send interactive buttons: ${JSON.stringify(error.response?.data || error.message)}`);
     }
@@ -793,12 +932,13 @@ export class WhatsAppService {
         },
       );
       this.logger.log(`List message sent to ${to}: ${response.status}`);
+      await this.logMessage(tenantId, to, 'BOT', bodyText);
     } catch (error: any) {
       this.logger.error(`Failed to send list message: ${JSON.stringify(error.response?.data || error.message)}`);
     }
   }
 
-  async sendTextMessage(tenantId: string, to: string, text: string) {
+  async sendTextMessage(tenantId: string, to: string, text: string, sender: 'BOT' | 'STAFF' = 'BOT') {
     const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
     if (!tenant) {
       this.logger.warn(`Tenant ${tenantId} not found. Message aborted.`);
@@ -832,9 +972,25 @@ export class WhatsAppService {
         },
       );
       this.logger.log(`Message sent successfully to ${to}`);
+      await this.logMessage(tenantId, to, sender, text);
     } catch (error: any) {
       this.logger.error(`Failed to send WhatsApp message to ${to}: ${error.response?.data ? JSON.stringify(error.response.data) : error.message}`);
       throw new HttpException('Failed to send WhatsApp message', HttpStatus.BAD_GATEWAY);
+    }
+  }
+
+  private async logMessage(tenantId: string, customerPhone: string, sender: 'USER' | 'BOT' | 'STAFF', content: string) {
+    try {
+      await this.prisma.chatMessage.create({
+        data: {
+          tenantId,
+          customerPhone,
+          sender,
+          content: content.slice(0, 5000) // Safety truncation
+        }
+      });
+    } catch (error: any) {
+      this.logger.error(`Failed to log chat message: ${error.message}`);
     }
   }
 

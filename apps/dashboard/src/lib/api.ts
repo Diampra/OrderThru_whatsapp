@@ -26,21 +26,24 @@ export type DashboardSummary = {
 export type Role = 'SUPER_ADMIN' | 'TENANT_ADMIN';
 
 export type ProductSchemaItem = {
+  id?: string;
   name: string;
   label?: string;
   type: 'string' | 'number' | 'boolean' | 'select' | 'text';
   required?: boolean;
   displayInList?: boolean;
   options?: string[];
-  icon?: string;          // e.g. 🥦, 🌶️
+  icon?: string;          
   appliesTo?: string[];   // Specific categories this field applies to. Empty = all.
 };
 
 export type Tenant = {
   id: string;
   name: string;
+  businessType?: string;
   productSchema: ProductSchemaItem[] | null;
   categories: string[] | null;
+  isBotEnabled: boolean;
   whatsappPhoneNumberId?: string;
   whatsappAccessToken?: string;
   whatsappVerifyToken?: string;
@@ -89,6 +92,7 @@ export type Order = {
   customerPhone: string;
   totalAmount: string;
   status: 'PENDING' | 'PREPARING' | 'READY' | 'COMPLETED';
+  source: 'BOT' | 'MANUAL';
   createdAt: string;
   paymentLinkUrl: string | null;
   orderItems: Array<{
@@ -103,4 +107,14 @@ export type Order = {
     id: string;
     rating: number;
   }>;
+};
+
+export type StaffAlert = {
+  id: string;
+  tenantId: string;
+  customerPhone: string;
+  reason: string;
+  isDismissed: boolean;
+  createdAt: string;
+  updatedAt: string;
 };

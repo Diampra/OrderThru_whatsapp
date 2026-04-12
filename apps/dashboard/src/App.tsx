@@ -1,7 +1,7 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, Fragment } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { io } from 'socket.io-client';
-import { api, type DashboardSummary, type Product, type Order, type Review, type Role, type Tenant, type ProductSchemaItem } from './lib/api';
+import { api, type DashboardSummary, type Product, type Order, type Review, type Role, type Tenant, type ProductSchemaItem, type StaffAlert } from './lib/api';
 
 const statusOptions = ['PENDING', 'PREPARING', 'READY', 'COMPLETED'] as const;
 
@@ -62,6 +62,23 @@ export default function App() {
 
   const [recentOrders, setRecentOrders] = useState<Set<string>>(new Set());
   const [now, setNow] = useState(new Date());
+
+  // Reply state
+  const [replyingTo, setReplyingTo] = useState<string | null>(null);
+  const [replyMessage, setReplyMessage] = useState('');
+
+  // Manual Order state
+  const [isManualModalOpen, setIsManualModalOpen] = useState(false);
+  const [manualPhone, setManualPhone] = useState('');
+  const [manualItems, setManualItems] = useState<{productId: string, quantity: number}[]>([]);
+  
+  // Toast state
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  };
 
   // Force re-render every minute for delayed status updates
   useEffect(() => {
@@ -125,6 +142,13 @@ export default function App() {
         socket.emit('joinTenant', currentUser.tenantId);
       });
 
+      socket.on('staff.notification', () => {
+        const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+        audio.play().catch(e => console.error('Audio playback failed:', e));
+        // Refresh alerts from DB
+        queryClient.invalidateQueries({ queryKey: ['staff-alerts'] });
+      });
+
       socket.on('order.created', (order: Order) => {
         // Play notification sound
         const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
@@ -182,6 +206,12 @@ export default function App() {
     enabled: Boolean(token) && currentUser?.role === 'TENANT_ADMIN',
   });
 
+  const productsQuery = useQuery({
+    queryKey: ['products'],
+    queryFn: async () => (await api.get<Product[]>('/product/admin/all')).data,
+    enabled: Boolean(token) && currentUser?.role === 'TENANT_ADMIN',
+  });
+
   const productQuery = useQuery({
     queryKey: ['products-admin'],
     queryFn: async () => (await api.get<Product[]>('/product/admin/all')).data,
@@ -204,6 +234,49 @@ export default function App() {
     queryKey: ['reviews'],
     queryFn: async () => (await api.get<Review[]>('/reviews')).data,
     enabled: Boolean(token) && currentUser?.role === 'TENANT_ADMIN',
+  });
+
+  const alertsQuery = useQuery({
+    queryKey: ['staff-alerts'],
+    queryFn: async () => (await api.get<StaffAlert[]>('/dashboard/alerts')).data,
+    enabled: Boolean(token) && currentUser?.role === 'TENANT_ADMIN',
+  });
+
+  const dismissAlertMutation = useMutation({
+    mutationFn: async (alertId: string) =>
+      api.patch(`/dashboard/alerts/${alertId}/dismiss`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['staff-alerts'] });
+    },
+  });
+
+  const replyMutation = useMutation({
+    mutationFn: async ({ customerPhone, message }: { customerPhone: string; message: string }) =>
+      api.post('/dashboard/reply', { customerPhone, message }),
+    onSuccess: () => {
+      setReplyingTo(null);
+      setReplyMessage('');
+      showToast('Reply sent successfully! 🚀');
+    },
+    onError: (err: any) => {
+      console.error('Reply failed:', err);
+      showToast('Failed to send reply. Please try again.', 'error');
+    }
+  });
+
+  const manualOrderMutation = useMutation({
+    mutationFn: async ({ customerPhone, items }: { customerPhone: string; items: any[] }) =>
+      api.post('/dashboard/manual-order', { customerPhone, items }),
+    onSuccess: () => {
+      setIsManualModalOpen(false);
+      setManualPhone('');
+      setManualItems([]);
+      showToast('Manual order placed successfully! 🛒');
+      queryClient.invalidateQueries({ queryKey: ['orders'] });
+    },
+    onError: (err: any) => {
+      alert('Failed to place manual order: ' + (err.response?.data?.message || err.message));
+    }
   });
 
   const statusMutation = useMutation({
@@ -261,10 +334,10 @@ export default function App() {
       queryClient.invalidateQueries({ queryKey: ['all-tenants'] });
       queryClient.invalidateQueries({ queryKey: ['current-tenant'] });
       setEditingTenant(null);
-      alert('Settings saved successfully!');
+      showToast('Settings saved successfully!');
     },
     onError: (error: any) => {
-      alert(`Error saving settings: ${error.response?.data?.message || error.message}`);
+      showToast(`Error saving settings: ${error.response?.data?.message || error.message}`, 'error');
     },
   });
 
@@ -694,6 +767,7 @@ export default function App() {
   const currentTenantSchema = tenantQuery.data?.productSchema || [];
 
   return (
+    <>
     <main className="min-h-screen px-4 py-6 md:px-8">
       <div className="mx-auto max-w-7xl">
         <header className="rounded-[2rem] bg-ink px-6 py-8 text-white shadow-panel md:px-8">
@@ -742,6 +816,109 @@ export default function App() {
 
             <section className="mt-6 grid gap-6 xl:grid-cols-[1.4fr_1fr]">
               <article className="rounded-[2rem] bg-white p-6 shadow-panel">
+                {(alertsQuery.data?.length ?? 0) > 0 && (
+                  <div className="mb-10 w-full">
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-4">
+                        <h2 className="font-display text-3xl text-red-500">Staff Action Required</h2>
+                        <button 
+                          onClick={() => setIsManualModalOpen(true)}
+                          className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-xs font-bold shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all"
+                        >
+                          📦 Place Manual Order
+                        </button>
+                      </div>
+                      <span className="bg-red-100 text-red-600 px-3 py-1 rounded-full text-xs font-bold">
+                        {alertsQuery.data?.filter(a => !a.isDismissed).length} Pending
+                      </span>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full text-left text-sm">
+                        <thead className="text-slate-500">
+                          <tr>
+                            <th className="pb-3">Customer</th>
+                            <th className="pb-3">Message / Action</th>
+                            <th className="pb-3">Time</th>
+                            <th className="pb-3 text-right">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {alertsQuery.data?.map((alertItem) => (
+                            <div key={alertItem.id} style={{ display: 'contents' }}>
+                              <tr className={alertItem.isDismissed ? 'opacity-40' : 'bg-red-50/50'}>
+                                <td className="py-4 px-4 font-medium text-ink">
+                                  {alertItem.customerPhone}
+                                </td>
+                                <td className="py-4 pr-4">
+                                  <span className="font-semibold text-slate-700">{alertItem.reason}</span>
+                                </td>
+                                <td className="py-4 pr-4 text-[10px] text-slate-400">
+                                  {new Date(alertItem.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                  <div>{new Date(alertItem.createdAt).toLocaleDateString()}</div>
+                                </td>
+                                <td className="py-4 pr-4 text-right">
+                                  {alertItem.isDismissed ? (
+                                    <span className="text-xs text-slate-400 font-semibold">✅ Handled</span>
+                                  ) : (
+                                    <div className="flex items-center justify-end gap-2">
+                                      <button
+                                        className="text-xs bg-indigo-50 border border-indigo-100 px-4 py-2 rounded-xl text-indigo-600 font-bold hover:bg-indigo-100"
+                                        onClick={() => {
+                                          setReplyingTo(replyingTo === alertItem.id ? null : alertItem.id);
+                                          setReplyMessage('');
+                                        }}
+                                      >
+                                        {replyingTo === alertItem.id ? 'Cancel' : '💬 Reply'}
+                                      </button>
+                                      <button
+                                        className="text-xs bg-white border border-slate-200 shadow-sm px-4 py-2 rounded-xl text-slate-600 font-bold hover:bg-slate-50 disabled:opacity-50"
+                                        disabled={dismissAlertMutation.isPending}
+                                        onClick={() => dismissAlertMutation.mutate(alertItem.id)}
+                                      >
+                                        Mark Handled ✅
+                                      </button>
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                              {replyingTo === alertItem.id && !alertItem.isDismissed && (
+                                <tr className="bg-indigo-50/30">
+                                  <td colSpan={4} className="p-4">
+                                    <div className="flex gap-3 items-end">
+                                      <div className="flex-1">
+                                        <label className="block text-[10px] uppercase tracking-wider font-bold text-indigo-400 mb-1">
+                                          Your Response to {alertItem.customerPhone}
+                                        </label>
+                                        <textarea
+                                          className="w-full rounded-xl border border-indigo-100 p-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none shadow-sm"
+                                          placeholder="Type your reply here..."
+                                          rows={2}
+                                          value={replyMessage}
+                                          onChange={(e) => setReplyMessage(e.target.value)}
+                                        />
+                                      </div>
+                                      <button
+                                        className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold text-sm shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all disabled:opacity-50"
+                                        disabled={!replyMessage.trim() || replyMutation.isPending}
+                                        onClick={() => replyMutation.mutate({ 
+                                          customerPhone: alertItem.customerPhone, 
+                                          message: replyMessage 
+                                        })}
+                                      >
+                                        {replyMutation.isPending ? 'Sending...' : 'Send Message 🚀'}
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                            </div>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
                 <div>
                   <h2 className="font-display text-3xl text-ink">Orders</h2>
                   <p className="mt-2 text-sm text-slate-500">Update status to trigger customer notifications and review collection.</p>
@@ -759,36 +936,90 @@ export default function App() {
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {ordersQuery.data?.map((order) => (
-                        <tr key={order.id} className={`transition-all duration-500 rounded-2xl ${getOrderStatusStyles(order)}`}>
-                          <td className="py-4 px-4 pr-4">
-                            <div className="font-medium text-ink">{order.customerPhone}</div>
-                            <div className="text-[10px] font-mono font-bold tracking-tighter text-indigo-500 bg-indigo-50 px-1.5 py-0.5 rounded-md inline-block mt-1">
-                              {maskId(order.id)}
-                            </div>
-                          </td>
-                          <td className="py-4 pr-4">
-                            <div className="text-xs font-semibold text-slate-700">
-                              {order.orderItems.map((item) => item.product.name).join(', ')}
-                            </div>
-                            <div className="text-[10px] text-slate-400 mt-1">
-                              {new Date(order.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                            </div>
-                          </td>
-                          <td className="py-4 pr-4 font-display text-ink font-bold">{formatPrice(order.totalAmount)}</td>
-                          <td className="py-4 pr-4">
-                            <select
-                              className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold bg-white"
-                              value={order.status}
-                              onChange={(event) =>
-                                statusMutation.mutate({ orderId: order.id, status: event.target.value })
-                              }
-                            >
-                              {statusOptions.map((status) => (
-                                <option key={status} value={status}>{status}</option>
-                              ))}
-                            </select>
-                          </td>
-                        </tr>
+                        <Fragment key={order.id}>
+                          <tr className={`transition-all duration-500 rounded-2xl ${getOrderStatusStyles(order)}`}>
+                            <td className="py-4 px-4 pr-4">
+                              <div className="flex items-center gap-2">
+                                <div className="font-medium text-ink">{order.customerPhone}</div>
+                                {order.source === 'MANUAL' ? (
+                                  <span className="text-[9px] bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded-md font-bold uppercase tracking-tighter">👤 Staff</span>
+                                ) : (
+                                  <span className="text-[9px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-md font-bold uppercase tracking-tighter">🤖 Bot</span>
+                                )}
+                              </div>
+                              <div className="text-[10px] font-mono font-bold tracking-tighter text-indigo-500 bg-indigo-50 px-1.5 py-0.5 rounded-md inline-block mt-1">
+                                {maskId(order.id)}
+                              </div>
+                            </td>
+                            <td className="py-4 pr-4">
+                              <div className="text-xs font-semibold text-slate-700">
+                                {order.orderItems.map((item) => item.product.name).join(', ')}
+                              </div>
+                              <div className="text-[10px] text-slate-400 mt-1">
+                                {new Date(order.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </div>
+                            </td>
+                            <td className="py-4 pr-4 font-display text-ink font-bold">{formatPrice(order.totalAmount)}</td>
+                            <td className="py-4 pr-4">
+                              <div className="flex items-center justify-end gap-2">
+                                <button
+                                  className={`text-[10px] font-bold px-3 py-1.5 rounded-lg transition-all ${
+                                    replyingTo === order.id 
+                                      ? 'bg-ink text-white' 
+                                      : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                                  }`}
+                                  onClick={() => {
+                                    setReplyingTo(replyingTo === order.id ? null : order.id);
+                                    setReplyMessage('');
+                                  }}
+                                >
+                                  {replyingTo === order.id ? 'Close Chat' : '💬 Chat'}
+                                </button>
+                                <select
+                                  className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold bg-white"
+                                  value={order.status}
+                                  onChange={(event) =>
+                                    statusMutation.mutate({ orderId: order.id, status: event.target.value })
+                                  }
+                                >
+                                  {statusOptions.map((status) => (
+                                    <option key={status} value={status}>{status}</option>
+                                  ))}
+                                </select>
+                              </div>
+                            </td>
+                          </tr>
+                          {replyingTo === order.id && (
+                            <tr className="bg-indigo-50/30">
+                              <td colSpan={4} className="p-4">
+                                <div className="flex gap-3 items-end">
+                                  <div className="flex-1">
+                                    <label className="block text-[10px] uppercase tracking-wider font-bold text-indigo-400 mb-1">
+                                      Chat with {order.customerPhone} (Order {maskId(order.id)})
+                                    </label>
+                                    <textarea
+                                      className="w-full rounded-xl border border-indigo-100 p-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none shadow-sm"
+                                      placeholder="Type your message here..."
+                                      rows={2}
+                                      value={replyMessage}
+                                      onChange={(e) => setReplyMessage(e.target.value)}
+                                    />
+                                  </div>
+                                  <button
+                                    className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold text-sm shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all disabled:opacity-50"
+                                    disabled={!replyMessage.trim() || replyMutation.isPending}
+                                    onClick={() => replyMutation.mutate({ 
+                                      customerPhone: order.customerPhone, 
+                                      message: replyMessage 
+                                    })}
+                                  >
+                                    {replyMutation.isPending ? 'Sending...' : 'Send Message 🚀'}
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
                       ))}
                     </tbody>
                   </table>
@@ -893,7 +1124,7 @@ export default function App() {
                     if (!field.appliesTo || field.appliesTo.length === 0) return true;
                     return field.appliesTo.includes(productForm.category);
                   }).map((field) => {
-                    const fieldKey = field.name || field.id;
+                    const fieldKey = (field.name || field.id) as string;
                     return (
                       <div key={fieldKey}>
                         <p className="text-xs text-slate-500 mb-1 ml-2">
@@ -1013,6 +1244,37 @@ export default function App() {
           </>
         ) : (
           <section className="mt-6 grid gap-6 lg:grid-cols-2">
+             <article className="rounded-[2rem] bg-white p-8 shadow-panel col-span-full">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="font-display text-3xl text-ink">AI Ordering Assistant</h2>
+                    <p className="text-sm text-slate-500 mt-1">When disabled, all messages are flagged for manual response. No automated replies will be sent.</p>
+                  </div>
+                  <div className="flex items-center gap-4">
+                     <span className={`text-[10px] font-bold uppercase tracking-widest px-3 py-1 rounded-full ${
+                       tenantQuery.data?.isBotEnabled 
+                        ? 'bg-indigo-100 text-indigo-700' 
+                        : 'bg-slate-100 text-slate-500'
+                     }`}>
+                       {tenantQuery.data?.isBotEnabled ? 'Bot Active 🤖' : 'Manual Only 👤'}
+                     </span>
+                     <button 
+                       onClick={() => updateTenantMutation.mutate({ 
+                         id: tenantQuery.data?.id, 
+                         isBotEnabled: !tenantQuery.data?.isBotEnabled 
+                       })}
+                       className={`relative inline-flex h-9 w-16 items-center rounded-full transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
+                         tenantQuery.data?.isBotEnabled ? 'bg-indigo-600 shadow-lg shadow-indigo-200' : 'bg-slate-200'
+                       }`}
+                     >
+                       <span className={`inline-block h-7 w-7 transform rounded-full bg-white transition-transform duration-300 shadow-md ${
+                         tenantQuery.data?.isBotEnabled ? 'translate-x-8' : 'translate-x-1'
+                       }`} />
+                     </button>
+                  </div>
+                </div>
+             </article>
+
              <article className="rounded-[2rem] bg-white p-8 shadow-panel">
                 <h2 className="font-display text-3xl text-ink mb-6">Business Operations</h2>
                 <form className="space-y-6" onSubmit={(e) => {
@@ -1131,7 +1393,117 @@ export default function App() {
             ))}
           </div>
         </section>
-      </div>
-    </main>
+
+      {/* Manual Order Modal */}
+      {isManualModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/50 backdrop-blur-sm p-4">
+          <div className="w-full max-w-lg bg-white rounded-[2.5rem] p-8 shadow-2xl animate-in fade-in zoom-in duration-300">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="font-display text-2xl text-ink">Manual Order Placement</h2>
+              <button 
+                onClick={() => setIsManualModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-[10px] font-bold text-slate-400 uppercase ml-1 mb-1">Customer Phone Number</label>
+                <input 
+                  className="w-full rounded-2xl border border-slate-200 px-4 py-3 outline-none focus:border-indigo-600"
+                  placeholder="e.g. 919876543210"
+                  value={manualPhone}
+                  onChange={e => setManualPhone(e.target.value)}
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-400 uppercase ml-1 mb-1">Select Products</label>
+                <div className="max-h-56 overflow-y-auto border border-slate-100 rounded-2xl p-2 space-y-2">
+                  {productsQuery.data?.filter(p => p.isAvailable).map(product => {
+                    const existing = manualItems.find(i => i.productId === product.id);
+                    return (
+                      <div key={product.id} className="flex items-center justify-between p-2 rounded-xl border border-slate-50 bg-slate-50/30">
+                        <span className="text-sm font-medium">{product.name} ({formatPrice(product.price)})</span>
+                        <div className="flex items-center gap-2">
+                           {existing ? (
+                             <>
+                               <button 
+                                 onClick={() => {
+                                   if (existing.quantity > 1) {
+                                     setManualItems(curr => curr.map(i => i.productId === product.id ? {...i, quantity: i.quantity - 1} : i));
+                                   } else {
+                                     setManualItems(curr => curr.filter(i => i.productId !== product.id));
+                                   }
+                                 }}
+                                 className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-slate-200 text-slate-600"
+                               >-</button>
+                               <span className="text-sm font-bold w-4 text-center">{existing.quantity}</span>
+                               <button 
+                                 onClick={() => {
+                                   if (existing.quantity < 10) {
+                                     setManualItems(curr => curr.map(i => i.productId === product.id ? {...i, quantity: i.quantity + 1} : i));
+                                   }
+                                 }}
+                                 className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-slate-200 text-slate-600"
+                               >+</button>
+                             </>
+                           ) : (
+                             <button 
+                               onClick={() => setManualItems(curr => [...curr, { productId: product.id, quantity: 1 }])}
+                               className="text-[10px] font-bold text-indigo-600 border border-indigo-100 bg-white px-3 py-1.5 rounded-lg"
+                             >
+                               ADD TO ORDER
+                             </button>
+                           )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="pt-4 border-t border-slate-100">
+                <div className="flex justify-between items-center mb-4 text-lg font-display font-bold">
+                  <span>Estimated Total (Incl. Tax)</span>
+                  <span>
+                    {formatPrice(manualItems.reduce((acc, item) => {
+                      const p = productsQuery.data?.find(pr => pr.id === item.productId);
+                      return acc + (Number(p?.price || 0) * item.quantity);
+                    }, 0) * 1.05)}
+                  </span>
+                </div>
+
+                <button 
+                  className="w-full bg-ink text-white py-4 rounded-2xl font-bold text-sm shadow-xl hover:bg-slate-800 transition-all disabled:opacity-50"
+                  disabled={!manualPhone || manualItems.length === 0 || manualOrderMutation.isPending}
+                  onClick={() => manualOrderMutation.mutate({ customerPhone: manualPhone, items: manualItems })}
+                >
+                  {manualOrderMutation.isPending ? 'Placing Order...' : 'Confirm & Place Order 🛒'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+        </div>
+      </main>
+
+      {/* Toast Notifications */}
+      {toast && (
+        <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[100] animate-in slide-in-from-bottom-4 duration-300">
+          <div className={`px-6 py-3 rounded-2xl shadow-2xl font-bold text-sm tracking-wide flex items-center gap-2 border ${
+            toast.type === 'success' 
+             ? 'bg-ink text-white border-white/10' 
+             : 'bg-red-600 text-white border-red-500'
+          }`}>
+            {toast.type === 'success' ? '✅' : '⚠️'}
+            {toast.message}
+          </div>
+        </div>
+      )}
+    </>
   );
 }

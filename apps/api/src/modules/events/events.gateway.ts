@@ -40,4 +40,13 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.logger.log(`Emitting new order for tenant: ${tenantId}`);
     this.server.to(`tenant_${tenantId}`).emit('order.created', order);
   }
+
+  emitStaffNotification(tenantId: string, customerPhone: string, reason: string) {
+    this.logger.log(`Emitting staff notification for tenant: ${tenantId}`);
+    this.server.to(`tenant_${tenantId}`).emit('staff.notification', {
+      customerPhone,
+      reason,
+      timestamp: new Date()
+    });
+  }
 }

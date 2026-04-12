@@ -62,6 +62,51 @@ export class OrderService {
     };
   }
 
+  async searchProducts(tenantId: string, query: string, limit: number = 3) {
+    const sanitizedQuery = query.trim().replace(/[^\w\s]/gi, '');
+    if (!sanitizedQuery) return [];
+
+    // Layered search:
+    // 1. Exact name match (highest priority)
+    // 2. Typos & similarity match (via pg_trgm)
+    // 3. Tag match (JSONB path search)
+    // 4. Levenshtein distance (for short query robustness)
+    
+    const results = await this.prisma.$queryRawUnsafe<any[]>(`
+      SELECT 
+        p.*,
+        CAST(similarity(name, $1) AS FLOAT) as similarity_score,
+        levenshtein(LOWER(name), LOWER($1)) as distance
+      FROM "Product" p
+      WHERE 
+        "tenantId" = $2 AND "isAvailable" = true
+        AND (
+          name ILIKE $3 -- Partial name
+          OR name % $1 -- Similarity (trigram)
+          OR tags::text ILIKE $4 -- Tag search
+          OR ($5::int < 3 AND levenshtein(LOWER(name), LOWER($1)) < 3) -- Levenshtein for short typos
+        )
+      ORDER BY 
+        CASE WHEN name ILIKE $1 THEN 1 ELSE 2 END,
+        similarity_score DESC,
+        distance ASC
+      LIMIT $6
+    `, 
+      sanitizedQuery, 
+      tenantId, 
+      `%${sanitizedQuery}%`, 
+      `%${sanitizedQuery}%`,
+      sanitizedQuery.length,
+      limit
+    );
+
+    return results.map(p => ({
+      ...p,
+      price: Number(p.price),
+      similarity: Number(p.similarity_score || 0)
+    }));
+  }
+
   async incrementItemQty(tenantId: string, customerPhone: string, productId: string) {
     return this.applyQtyChange(tenantId, customerPhone, productId, 1);
   }
@@ -173,7 +218,7 @@ export class OrderService {
     }
   }
 
-  async addToCart(tenantId: string, customerPhone: string, productId: string) {
+  async addToCart(tenantId: string, customerPhone: string, productId: string, quantityToAdd: number = 1) {
     const product = await this.productService.getById(tenantId, productId);
     
     return this.prisma.$transaction(async (tx) => {
@@ -202,7 +247,7 @@ export class OrderService {
 
       if (existingItem) {
         if (existingItem.quantity >= 10) return cart;
-        const newQty = existingItem.quantity + 1;
+        const newQty = Math.min(10, existingItem.quantity + quantityToAdd);
         await tx.orderItem.update({
           where: { id: existingItem.id },
           data: { 
@@ -215,9 +260,9 @@ export class OrderService {
           data: {
             orderId: cart.id,
             productId: product.id,
-            quantity: 1,
+            quantity: Math.min(10, quantityToAdd),
             unitPrice: product.price,
-            taxAmount: Number(product.price) * taxRate
+            taxAmount: (Number(product.price) * Math.min(10, quantityToAdd)) * taxRate
           },
         });
       }
@@ -237,69 +282,7 @@ export class OrderService {
     });
   }
 
-  async bulkAddToCart(tenantId: string, customerPhone: string, items: { name: string; quantity: number }[]) {
-    let cart = await this.getCart(tenantId, customerPhone);
-
-    if (!cart) {
-      cart = await this.prisma.order.create({
-        data: {
-          tenantId,
-          customerPhone,
-          status: OrderStatus.DRAFT,
-          totalAmount: 0,
-        },
-        include: { orderItems: { include: { product: true } } },
-      });
-    }
-
-    const results: string[] = [];
-    const errors: string[] = [];
-
-    for (const item of items) {
-      const product = await this.productService.findByName(tenantId, item.name);
-      if (!product) {
-        errors.push(item.name);
-        continue;
-      }
-
-      const existingItem = (cart.orderItems as any[]).find(oi => oi.productId === product.id);
-
-      if (existingItem) {
-        await this.prisma.orderItem.update({
-          where: { id: existingItem.id },
-          data: { quantity: { increment: item.quantity } },
-        });
-      } else {
-        await this.prisma.orderItem.create({
-          data: {
-            orderId: cart.id,
-            productId: product.id,
-            quantity: item.quantity,
-            unitPrice: product.price,
-          },
-        });
-      }
-      results.push(`${item.quantity}x ${product.name}`);
-    }
-
-    // Refresh cart and update total
-    const updatedCart = await this.prisma.order.findUnique({
-      where: { id: cart.id },
-      include: { orderItems: true },
-    });
-
-    const total = updatedCart!.orderItems.reduce((acc: number, item: any) => {
-      return acc + (Number(item.unitPrice) * item.quantity);
-    }, 0);
-
-    const finalCart = await this.prisma.order.update({
-      where: { id: cart.id },
-      data: { totalAmount: total },
-      include: { orderItems: { include: { product: true } } },
-    });
-
-    return { cart: finalCart, results, errors };
-  }
+  // Deprecated bulkAddToCart removed
 
   async finalizeOrder(tenantId: string, customerPhone: string) {
     const cart = await this.getCart(tenantId, customerPhone);
@@ -476,5 +459,64 @@ export class OrderService {
     ]
       .filter(Boolean)
       .join('\n');
+  }
+
+  async createManualOrder(tenantId: string, customerPhone: string, items: Array<{ productId: string; quantity: number }>) {
+    return this.prisma.$transaction(async (tx) => {
+      const tenant = await tx.tenant.findUnique({ where: { id: tenantId } });
+      const defaultRate = Number(this.configService.get('DEFAULT_TAX_RATE')) || 0.05;
+      const taxRate = tenant?.taxRate ? Number(tenant.taxRate) : defaultRate;
+
+      // 1. Create the base order
+      const order = await tx.order.create({
+        data: {
+          tenantId,
+          customerPhone,
+          status: OrderStatus.PENDING,
+          totalAmount: 0, 
+          paymentMethod: PaymentMethod.COD,
+          source: 'MANUAL',
+        },
+      });
+
+      // 2. Fetch products and create items
+      let totalAmount = 0;
+      for (const itemInput of items) {
+        const product = await tx.product.findUnique({ where: { id: itemInput.productId } });
+        if (!product || product.tenantId !== tenantId) continue;
+
+        const subtotal = Number(product.price) * itemInput.quantity;
+        const tax = subtotal * taxRate;
+        totalAmount += subtotal + tax;
+
+        await tx.orderItem.create({
+          data: {
+            orderId: order.id,
+            productId: product.id,
+            quantity: itemInput.quantity,
+            unitPrice: product.price,
+            taxAmount: tax,
+          },
+        });
+      }
+
+      // 3. Update total
+      const finalizedOrder = await tx.order.update({
+        where: { id: order.id },
+        data: { totalAmount },
+        include: {
+          orderItems: { include: { product: true } },
+        },
+      });
+
+      // 4. Notify Dashboard
+      this.eventsGateway.emitNewOrder(tenantId, finalizedOrder);
+
+      // 5. Send WhatsApp Message
+      const confirmationMsg = `🍴 *New Order Placed by Staff*\n\nYour order has been placed successfully by our team.\n\n*Order ID:* ${finalizedOrder.id.slice(-6).toUpperCase()}\n*Total:* ${formatInr(totalAmount)}\n\nThank you!`;
+      await this.whatsAppService.sendTextMessage(tenantId, customerPhone, confirmationMsg);
+
+      return finalizedOrder;
+    });
   }
 }
