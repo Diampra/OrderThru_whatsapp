@@ -389,12 +389,28 @@ export class OrderService {
     return order;
   }
 
-  listOrders(tenantId: string) {
+  listOrders(tenantId: string, filters?: { status?: OrderStatus, startDate?: string, endDate?: string, phone?: string }) {
+    const where: any = {
+      tenantId,
+      status: { not: OrderStatus.DRAFT }
+    };
+
+    if (filters?.status) {
+      where.status = filters.status;
+    }
+
+    if (filters?.startDate || filters?.endDate) {
+      where.createdAt = {};
+      if (filters.startDate) where.createdAt.gte = new Date(filters.startDate);
+      if (filters.endDate) where.createdAt.lte = new Date(filters.endDate);
+    }
+
+    if (filters?.phone) {
+      where.customerPhone = { contains: filters.phone };
+    }
+
     return this.prisma.order.findMany({
-      where: { 
-        tenantId,
-        status: { not: OrderStatus.DRAFT }
-      },
+      where,
       include: {
         orderItems: {
           include: { product: true },

@@ -53,6 +53,7 @@ export type Tenant = {
   openTime?: string;
   closeTime?: string;
   timezone?: string;
+  taxRate?: string | number;
   messageTemplates?: Record<string, string>;
   _count?: {
     products: number;
@@ -135,4 +136,9 @@ export type Conversation = {
   lastMessageAt: string;
   lastMessageSender: 'USER' | 'BOT' | 'STAFF';
   unresolvedAlertCount: number;
+};
+
+export type SalesAnalytics = {
+  date: string;
+  sales: number;
 };

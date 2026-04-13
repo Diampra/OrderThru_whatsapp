@@ -83,9 +83,18 @@ export class ReviewService {
     };
   }
 
-  listDashboardReviews(tenantId: string) {
+  listDashboardReviews(tenantId: string, filters?: { rating?: number, productId?: string }) {
+    const where: any = { product: { tenantId: tenantId } };
+
+    if (filters?.rating) {
+      where.rating = Number(filters.rating);
+    }
+    if (filters?.productId) {
+      where.productId = filters.productId;
+    }
+
     return this.prisma.review.findMany({
-      where: { product: { tenantId: tenantId } },
+      where,
       include: {
         product: true,
         order: true,

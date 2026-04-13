@@ -35,6 +35,43 @@ export class DashboardService {
     };
   }
 
+  async getSalesAnalytics(tenantId: string, period: 'daily' | 'monthly' = 'daily') {
+    const orders = await this.prisma.order.findMany({
+      where: { 
+        tenantId,
+        status: { in: ['COMPLETED', 'READY'] }
+      },
+      select: {
+        createdAt: true,
+        totalAmount: true,
+      },
+      orderBy: { createdAt: 'asc' }
+    });
+
+    const dataMap = new Map<string, number>();
+
+    orders.forEach(order => {
+      const date = new Date(order.createdAt);
+      let key = '';
+      
+      if (period === 'daily') {
+        // YYYY-MM-DD
+        key = date.toISOString().split('T')[0];
+      } else {
+        // YYYY-MM
+        key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+      }
+
+      const amount = Number(order.totalAmount || 0);
+      dataMap.set(key, (dataMap.get(key) || 0) + amount);
+    });
+
+    return Array.from(dataMap.entries()).map(([date, sales]) => ({
+      date,
+      sales,
+    }));
+  }
+
   /**
    * Returns one entry per unique customer phone with their latest message
    * and count of unresolved alerts — powering the left-panel conversation list.

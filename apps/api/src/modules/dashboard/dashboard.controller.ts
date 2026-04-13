@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -14,6 +14,12 @@ export class DashboardController {
   @Get('summary')
   getSummary(@Req() req: any) {
     return this.dashboardService.getSummary(req.user.tenantId);
+  }
+
+  @Roles(Role.TENANT_ADMIN)
+  @Get('analytics/sales')
+  getSalesAnalytics(@Req() req: any, @Query('period') period?: 'daily' | 'monthly') {
+    return this.dashboardService.getSalesAnalytics(req.user.tenantId, period || 'daily');
   }
 
   // ── Conversations (new) ──────────────────────────────────────────────────────

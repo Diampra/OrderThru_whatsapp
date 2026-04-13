@@ -1,7 +1,8 @@
 import { useState, useMemo, useEffect, Fragment, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { io } from 'socket.io-client';
-import { api, type DashboardSummary, type Product, type Order, type Review, type Role, type Tenant, type ProductSchemaItem, type StaffAlert, type ChatMessage, type Conversation } from './lib/api';
+import { api, type DashboardSummary, type Product, type Order, type Review, type Role, type Tenant, type ProductSchemaItem, type StaffAlert, type ChatMessage, type Conversation, type SalesAnalytics } from './lib/api';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid } from 'recharts';
 
 const statusOptions = ['PENDING', 'PREPARING', 'READY', 'COMPLETED'] as const;
 
@@ -57,8 +58,13 @@ export default function App() {
   const [productForm, setProductForm] = useState<ProductFormState>(emptyProductForm);
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [editingTenant, setEditingTenant] = useState<Tenant | null>(null);
-  const [activeTab, setActiveTab]= useState<'dashboard' | 'pos' | 'settings'>('dashboard');
+  const [activeTab, setActiveTab]= useState<'dashboard' | 'analytics' | 'orders' | 'reviews' | 'pos' | 'settings'>('dashboard');
   const [localSchema, setLocalSchema] = useState<ProductSchemaItem[]>([]);
+  
+  const [orderFilters, setOrderFilters] = useState({ status: '', startDate: '', endDate: '', phone: '' });
+  const [reviewFilters, setReviewFilters] = useState({ rating: '', productId: '' });
+  const [analyticsPeriod, setAnalyticsPeriod] = useState<'daily'|'monthly'>('daily');
+
   
   const token = window.localStorage.getItem('restaurant_admin_token');
   const userStr = window.localStorage.getItem('restaurant_admin_user');
@@ -241,8 +247,23 @@ export default function App() {
   });
 
   const ordersQuery = useQuery({
-    queryKey: ['orders'],
-    queryFn: async () => (await api.get<Order[]>('/orders')).data,
+    queryKey: ['orders', orderFilters],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (orderFilters.status) params.append('status', orderFilters.status);
+      if (orderFilters.startDate) params.append('startDate', orderFilters.startDate);
+      if (orderFilters.endDate) params.append('endDate', orderFilters.endDate);
+      if (orderFilters.phone) params.append('phone', orderFilters.phone);
+      return (await api.get<Order[]>(`/orders?${params.toString()}`)).data;
+    },
+    enabled: Boolean(token) && currentUser?.role === 'TENANT_ADMIN',
+  });
+
+  const analyticsQuery = useQuery({
+    queryKey: ['analytics', analyticsPeriod],
+    queryFn: async () => {
+      return (await api.get<SalesAnalytics[]>(`/dashboard/analytics/sales?period=${analyticsPeriod}`)).data;
+    },
     enabled: Boolean(token) && currentUser?.role === 'TENANT_ADMIN',
   });
 
@@ -271,8 +292,13 @@ export default function App() {
   });
 
   const reviewsQuery = useQuery({
-    queryKey: ['reviews'],
-    queryFn: async () => (await api.get<Review[]>('/reviews')).data,
+    queryKey: ['reviews', reviewFilters],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (reviewFilters.rating) params.append('rating', reviewFilters.rating);
+      if (reviewFilters.productId) params.append('productId', reviewFilters.productId);
+      return (await api.get<Review[]>(`/reviews?${params.toString()}`)).data;
+    },
     enabled: Boolean(token) && currentUser?.role === 'TENANT_ADMIN',
   });
 
@@ -866,11 +892,23 @@ export default function App() {
           <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
             <div>
               <p className="text-sm uppercase tracking-[0.3em] text-red-200">{tenantQuery.data?.name || 'Loading...'}</p>
-              <nav className="mt-4 flex gap-8 border-b border-white/10">
+              <nav className="mt-4 flex flex-wrap gap-x-8 gap-y-4 border-b border-white/10">
                  <button 
                   onClick={() => setActiveTab('dashboard')}
                   className={`pb-4 text-sm font-medium transition-colors ${activeTab === 'dashboard' ? 'text-white border-b-2 border-ember' : 'text-white/40 hover:text-white/60'}`}
-                 >Dashboard</button>
+                 >Live Operations</button>
+                 <button 
+                  onClick={() => setActiveTab('analytics')}
+                  className={`pb-4 text-sm font-medium transition-colors ${activeTab === 'analytics' ? 'text-white border-b-2 border-ember' : 'text-white/40 hover:text-white/60'}`}
+                 >Analytics</button>
+                 <button 
+                  onClick={() => setActiveTab('orders')}
+                  className={`pb-4 text-sm font-medium transition-colors ${activeTab === 'orders' ? 'text-white border-b-2 border-ember' : 'text-white/40 hover:text-white/60'}`}
+                 >All Orders</button>
+                 <button 
+                  onClick={() => setActiveTab('reviews')}
+                  className={`pb-4 text-sm font-medium transition-colors ${activeTab === 'reviews' ? 'text-white border-b-2 border-ember' : 'text-white/40 hover:text-white/60'}`}
+                 >Reviews</button>
                  <button 
                   onClick={() => setActiveTab('pos')}
                   className={`pb-4 text-sm font-medium transition-colors ${activeTab === 'pos' ? 'text-white border-b-2 border-ember' : 'text-white/40 hover:text-white/60'}`}
@@ -1080,7 +1118,7 @@ export default function App() {
                               onClick={() => {
                                 const latestOrder = ordersQuery.data?.find(o => o.customerPhone === selectedPhone);
                                 if (!latestOrder) {
-                                  toast.error('No orders found for this customer');
+                                  showToast('No orders found for this customer', 'error');
                                   return;
                                 }
                                 const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000';
@@ -1951,23 +1989,114 @@ export default function App() {
            </section>
         )}
 
-        <section className="mt-6 rounded-[2rem] bg-white p-6 shadow-panel">
-          <h2 className="font-display text-3xl text-ink">Reviews</h2>
-          <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {reviewsQuery.data?.map((review) => (
-              <article key={review.id} className="rounded-[1.5rem] border border-slate-100 p-4">
-                <div className="flex items-center justify-between">
-                  <p className="font-medium text-ink">{review.product.name}</p>
-                  <span className="rounded-full bg-orange-50 px-3 py-1 text-sm text-ember">{review.rating}/5</span>
-                </div>
-                <p className="mt-3 text-sm text-slate-600">{review.comment}</p>
-                <p className="mt-4 text-xs text-slate-400">
-                  {review.order.customerPhone} | {new Date(review.createdAt).toLocaleDateString()}
-                </p>
-              </article>
-            ))}
-          </div>
-        </section>
+        {activeTab === 'analytics' && (
+          <section className="mt-6 rounded-[2rem] bg-white p-6 shadow-panel">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="font-display text-3xl text-ink">Sales Analytics</h2>
+              <select className="px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl"
+                value={analyticsPeriod} onChange={(e) => setAnalyticsPeriod(e.target.value as any)}>
+                <option value="daily">Daily</option>
+                <option value="monthly">Monthly</option>
+              </select>
+            </div>
+            <div className="h-[400px]">
+              {analyticsQuery.data ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={analyticsQuery.data}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="date" />
+                    <YAxis />
+                    <Tooltip cursor={{fill: 'transparent'}} contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} />
+                    <Bar dataKey="sales" fill="#4f46e5" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : <p className="text-slate-400">Loading chart...</p>}
+            </div>
+          </section>
+        )}
+
+        {activeTab === 'orders' && (
+          <section className="mt-6 rounded-[2rem] bg-white p-6 shadow-panel">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="font-display text-3xl text-ink">All Orders</h2>
+              <div className="flex gap-2 text-sm">
+                <input type="date" className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl"
+                  value={orderFilters.startDate} onChange={(e) => setOrderFilters(f => ({...f, startDate: e.target.value}))} />
+                <input type="date" className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl"
+                  value={orderFilters.endDate} onChange={(e) => setOrderFilters(f => ({...f, endDate: e.target.value}))} />
+                <select className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl"
+                  value={orderFilters.status} onChange={(e) => setOrderFilters(f => ({...f, status: e.target.value}))}>
+                  <option value="">All Statuses</option>
+                  <option value="PENDING">PENDING</option>
+                  <option value="PREPARING">PREPARING</option>
+                  <option value="READY">READY</option>
+                  <option value="COMPLETED">COMPLETED</option>
+                </select>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-slate-100 text-slate-400">
+                    <th className="pb-3 font-medium">Order ID</th>
+                    <th className="pb-3 font-medium">Date</th>
+                    <th className="pb-3 font-medium">Phone</th>
+                    <th className="pb-3 font-medium">Status</th>
+                    <th className="pb-3 font-medium text-right">Total</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50">
+                  {ordersQuery.data?.map(order => (
+                    <tr key={order.id}>
+                      <td className="py-4 font-medium">#{order.id.slice(-7).toUpperCase()}</td>
+                      <td className="py-4 text-slate-500">{new Date(order.createdAt).toLocaleDateString()}</td>
+                      <td className="py-4">{order.customerPhone}</td>
+                      <td className="py-4">
+                        <span className={`px-2 py-1 rounded-full text-xs font-bold ${order.status === 'COMPLETED' ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-600'}`}>
+                          {order.status}
+                        </span>
+                      </td>
+                      <td className="py-4 text-right font-medium">{formatPrice(order.totalAmount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+        {activeTab === 'reviews' && (
+          <section className="mt-6 rounded-[2rem] bg-white p-6 shadow-panel">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="font-display text-3xl text-ink">Reviews</h2>
+              <div className="flex gap-2 text-sm">
+                <select className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl"
+                  value={reviewFilters.rating} onChange={(e) => setReviewFilters(f => ({...f, rating: e.target.value}))}>
+                  <option value="">All Ratings</option>
+                  <option value="5">5 Stars</option>
+                  <option value="4">4 Stars</option>
+                  <option value="3">3 Stars</option>
+                  <option value="2">2 Stars</option>
+                  <option value="1">1 Star</option>
+                </select>
+              </div>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {reviewsQuery.data?.map((review) => (
+                <article key={review.id} className="rounded-[1.5rem] border border-slate-100 p-4">
+                  <div className="flex items-center justify-between">
+                    <p className="font-medium text-ink">{review.product.name}</p>
+                    <span className="rounded-full bg-orange-50 px-3 py-1 text-sm text-ember">{review.rating}/5</span>
+                  </div>
+                  <p className="mt-3 text-sm text-slate-600">{review.comment}</p>
+                  <p className="mt-4 text-xs text-slate-400">
+                    {review.order.customerPhone} | {new Date(review.createdAt).toLocaleDateString()}
+                  </p>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
         </div>
       </main>
 

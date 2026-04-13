@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Req, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, Query, Req, UseGuards } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -12,8 +12,15 @@ export class ReviewController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.TENANT_ADMIN)
   @Get()
-  listDashboardReviews(@Req() req: any) {
-    return this.reviewService.listDashboardReviews(req.user.tenantId);
+  listDashboardReviews(
+    @Req() req: any,
+    @Query('rating') rating?: string,
+    @Query('productId') productId?: string,
+  ) {
+    return this.reviewService.listDashboardReviews(req.user.tenantId, {
+      rating: rating ? parseInt(rating, 10) : undefined,
+      productId,
+    });
   }
 
   @Get(':tenantId/:itemName')

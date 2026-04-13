@@ -1,5 +1,5 @@
-import { Body, Controller, Get, Param, Patch, Req, Res, UseGuards, Header } from '@nestjs/common';
-import { Role } from '@prisma/client';
+import { Body, Controller, Get, Param, Patch, Query, Req, Res, UseGuards, Header } from '@nestjs/common';
+import { OrderStatus, Role } from '@prisma/client';
 import { Response } from 'express';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -18,8 +18,14 @@ export class OrderController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.TENANT_ADMIN)
   @Get('orders')
-  listOrders(@Req() req: any) {
-    return this.orderService.listOrders(req.user.tenantId);
+  listOrders(
+    @Req() req: any,
+    @Query('status') status?: OrderStatus,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+    @Query('phone') phone?: string,
+  ) {
+    return this.orderService.listOrders(req.user.tenantId, { status, startDate, endDate, phone });
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
