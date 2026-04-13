@@ -49,4 +49,14 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       timestamp: new Date()
     });
   }
+
+  emitMessage(tenantId: string, customerPhone: string, sender: string, content: string) {
+    this.logger.log(`Emitting new message signal for tenant: ${tenantId}`);
+    this.server.to(`tenant_${tenantId}`).emit('message.received', {
+      customerPhone,
+      sender,
+      content,
+      timestamp: new Date()
+    });
+  }
 }

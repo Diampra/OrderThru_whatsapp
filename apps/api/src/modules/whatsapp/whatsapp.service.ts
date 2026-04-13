@@ -24,14 +24,14 @@ export class WhatsAppService {
     private readonly sessionService: WhatsAppSessionService,
     private readonly eventsGateway: EventsGateway,
     @Inject(forwardRef(() => OrderService)) private readonly orderService: OrderService,
-  ) {}
+  ) { }
 
   async verifyWebhook(tenantId: string, mode: string, verifyToken: string, challenge: string, response: Response) {
     const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
     if (!tenant || !tenant.whatsappVerifyToken) {
       return response.sendStatus(403);
     }
-    
+
     if (mode === 'subscribe' && verifyToken === tenant.whatsappVerifyToken) {
       return response.status(200).send(challenge);
     }
@@ -41,7 +41,7 @@ export class WhatsAppService {
 
   async handleIncomingWebhook(tenantId: string, payload: any) {
     const value = payload?.entry?.[0]?.changes?.[0]?.value;
-    
+
     // Ignore status updates (read, delivered, etc.)
     if (value?.statuses) return;
 
@@ -49,7 +49,7 @@ export class WhatsAppService {
     if (!message || !message.from) return;
 
     const customerPhone = message.from;
-    
+
     // Fetch tenant and check bot toggle
     const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
     const isBotEnabled = tenant?.isBotEnabled ?? true;
@@ -67,7 +67,7 @@ export class WhatsAppService {
 
     const isPaused = await this.sessionService.isPaused(tenantId, customerPhone);
     const messageType = message.type;
-    
+
     let rawText = '';
     if (messageType === 'interactive') {
       rawText = message.interactive.button_reply?.id || message.interactive.list_reply?.id || '';
@@ -124,7 +124,7 @@ export class WhatsAppService {
     // Business Hours Check
     const isOpen = await this.isBusinessOpen(tenantId);
     if (!isOpen) {
-      const closedMsg = await this.getTemplate(tenantId, 'BUSINESS_CLOSED', 
+      const closedMsg = await this.getTemplate(tenantId, 'BUSINESS_CLOSED',
         "We are currently closed. Please visit us during our working hours!");
       await this.logMessage(tenantId, customerPhone, 'USER', rawText);
       await this.sendTextMessage(tenantId, customerPhone, closedMsg);
@@ -163,8 +163,8 @@ export class WhatsAppService {
     } else if (finalResponse.type === 'list') {
       const cr = finalResponse as any;
       await this.sendListMessage(
-        tenantId, 
-        customerPhone, 
+        tenantId,
+        customerPhone,
         cr.body || "Please select:",
         cr.buttonLabel || "View Options",
         cr.sections || [],
@@ -172,21 +172,21 @@ export class WhatsAppService {
         cr.footer
       );
     } else if (finalResponse.type === 'buttons') {
-       const cr = finalResponse as any;
-       await this.sendInteractiveButtons(
-         tenantId, 
-         customerPhone, 
-         cr.text || '', 
-         cr.buttons || [],
-         cr.header,
-         cr.footer
-       );
+      const cr = finalResponse as any;
+      await this.sendInteractiveButtons(
+        tenantId,
+        customerPhone,
+        cr.text || '',
+        cr.buttons || [],
+        cr.header,
+        cr.footer
+      );
     }
   }
 
   async escalateToHuman(tenantId: string, phone: string, reason: string, pauseMinutes = 60) {
     await this.sessionService.pauseBot(tenantId, phone, pauseMinutes);
-    
+
     // Persist alert to DB
     await this.prisma.staffAlert.create({
       data: { tenantId, customerPhone: phone, reason }
@@ -231,7 +231,7 @@ export class WhatsAppService {
         if (!buttons.find((b: any) => b.id === 'VIEW_CART')) buttons.push({ id: 'VIEW_CART', title: 'View Cart 🛒' });
       }
       if (buttons.length < 3) {
-         if (!buttons.find((b: any) => b.id === 'HUMAN')) buttons.push({ id: 'HUMAN', title: 'Talk to Staff 🧑‍🍳' });
+        if (!buttons.find((b: any) => b.id === 'HUMAN')) buttons.push({ id: 'HUMAN', title: 'Talk to Staff 🧑‍🍳' });
       }
       response.buttons = buttons.slice(0, 3);
     }
@@ -245,11 +245,11 @@ export class WhatsAppService {
 
     const timezone = tenant.timezone || 'Asia/Kolkata';
     const now = new Date();
-    const localTimeStr = now.toLocaleTimeString('en-US', { 
-      hour12: false, 
-      hour: '2-digit', 
-      minute: '2-digit', 
-      timeZone: timezone 
+    const localTimeStr = now.toLocaleTimeString('en-US', {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: timezone
     });
 
     return localTimeStr >= tenant.openTime && localTimeStr <= tenant.closeTime;
@@ -264,7 +264,7 @@ export class WhatsAppService {
     for (const [vKey, vVal] of Object.entries(variables)) {
       template = template.replace(new RegExp(`{{${vKey}}}`, 'g'), vVal);
     }
-    
+
     return template;
   }
 
@@ -361,7 +361,7 @@ export class WhatsAppService {
       if (count >= 2) {
         return this.escalateToHuman(tenantId, customerPhone, `Bot failed to understand user after 2 attempts. Last message: "${rawText}"`);
       }
-      
+
       const fallback = response || "I didn't quite get that 😅 Here’s what you can do:";
       return this.handleDelayedFallback(tenantId, customerPhone, rawText, fallback);
     } else {
@@ -541,14 +541,14 @@ export class WhatsAppService {
 
   private async handleCheckout(tenantId: string, customerPhone: string) {
     const order = await this.orderService.finalizeOrder(tenantId, customerPhone);
-    const prompt = await this.getTemplate(tenantId, 'ORDER_PAYMENT_PROMPT', 
-      [`Great! Your order #${order.id.slice(-6).toUpperCase()} is ready.`, `Total: ${formatInr(Number(order.totalAmount))}`, '', 'How would you like to pay?'].join('\n'));
+    const prompt = await this.getTemplate(tenantId, 'ORDER_PAYMENT_PROMPT',
+      [`Great! Your order #${order.id.slice(-6).toUpperCase()} is received.`, `Total: ${formatInr(Number(order.totalAmount))}`, '', 'How would you like to pay?'].join('\n'));
 
     return {
       type: 'buttons',
       text: prompt,
       buttons: [
-        { id: '1', title: 'Pay Online 💳' }, 
+        { id: '1', title: 'Pay Online 💳' },
         { id: '2', title: 'COD 💵' }
       ]
     };
@@ -557,7 +557,7 @@ export class WhatsAppService {
   private async handleStatusCheck(tenantId: string, customerPhone: string) {
     const order = await this.orderService.getLatestOrderForCustomer(tenantId, customerPhone);
     return this.getTemplate(tenantId, 'ORDER_STATUS',
-      [`Latest order: {{id}}`, `Status: {{status}}`, `Total: {{total}}`].join('\n'), 
+      [`Latest order: {{id}}`, `Status: {{status}}`, `Total: {{total}}`].join('\n'),
       { id: order.id, status: order.status, total: formatInr(Number(order.totalAmount)) });
   }
 
@@ -621,7 +621,7 @@ export class WhatsAppService {
 
   private async handleProductSearch(tenantId: string, customerPhone: string, rawText: string) {
     const { quantity, itemName } = this.parseSearchInput(rawText);
-    
+
     if (!itemName || itemName.length < 2) {
       const fallback = "I'm not sure what you're looking for 😅 Send 'menu' to browse everything!";
       return this.handleDelayedFallback(tenantId, customerPhone, rawText, fallback);
@@ -634,7 +634,7 @@ export class WhatsAppService {
     if (results.length === 1 || (results.length > 0 && results[0].similarity > 0.8)) {
       const product = results[0];
       await this.orderService.addToCart(tenantId, customerPhone, product.id, quantity);
-      
+
       return {
         type: 'buttons',
         text: `✅ Added: ${quantity}x ${product.name} - ${formatInr(Number(product.price) * quantity)}`,
@@ -772,6 +772,25 @@ export class WhatsAppService {
       return null;
     }
 
+    const lowerText = rawText.trim().toLowerCase();
+    const highlights = ['hi', 'hello', 'start', 'menu', 'cart', 'view', 'help', 'status'];
+    const isCommand = highlights.some(h => lowerText.includes(h));
+
+    if (isCommand) {
+      // If user sends a command/greeting, abort ALL pending review conversations for this user
+      await this.prisma.order.updateMany({
+        where: {
+          tenantId,
+          customerPhone,
+          reviewConversation: {
+            in: [ReviewConversationState.WAITING_FOR_RATING, ReviewConversationState.WAITING_FOR_COMMENT],
+          },
+        },
+        data: { reviewConversation: ReviewConversationState.NONE }
+      });
+      return null;
+    }
+
     if (order.reviewConversation === ReviewConversationState.WAITING_FOR_RATING) {
       const rating = Number.parseInt(rawText, 10);
       if (Number.isNaN(rating) || rating < 1 || rating > 5) {
@@ -862,7 +881,7 @@ export class WhatsAppService {
 
       // Sanitization helper
       const clean = (str: string, limit: number, fallback = '...') => {
-        let val = (str || '').replace(/[*_~`]/g, '').trim(); 
+        let val = (str || '').replace(/[*_~`]/g, '').trim();
         if (!val) val = fallback;
         return val.slice(0, limit);
       };
@@ -888,7 +907,7 @@ export class WhatsAppService {
         // 2. Process Rows
         const safeRows = [];
         const rowsToProcess = (section.rows || []).slice(0, 10 - totalRows);
-        
+
         for (const row of rowsToProcess) {
           // Ensure Unique Row ID
           let rId = row.id || `row_${Math.random().toString(36).slice(2, 7)}`;
@@ -1003,6 +1022,8 @@ export class WhatsAppService {
           content: content.slice(0, 5000) // Safety truncation
         }
       });
+      // Emit real-time signal
+      this.eventsGateway.emitMessage(tenantId, customerPhone, sender, content);
     } catch (error: any) {
       this.logger.error(`Failed to log chat message: ${error.message}`);
     }
@@ -1048,10 +1069,10 @@ export class WhatsAppService {
 
   async buildEditItemMessage(item: any) {
     const text = `*Editing: ${item.name}*\n\nQty: ${item.quantity}\nPrice: ${formatInr(item.unitPrice)}\nSubtotal: ${formatInr(item.subtotal)}`;
-    
+
     const buttons = [];
     buttons.push({ id: `QTY_INC_${item.productId}`, title: 'Add 1 ➕' });
-    
+
     if (item.quantity > 1) {
       buttons.push({ id: `QTY_DEC_${item.productId}`, title: 'Remove 1 ➖' });
     } else {

@@ -465,11 +465,49 @@ export class OrderService {
       .join('\n');
   }
 
-  async createManualOrder(tenantId: string, customerPhone: string, items: Array<{ productId: string; quantity: number }>) {
+  private formatDetailedInvoice(order: any, discount: number = 0, notes?: string) {
+    const lines: string[] = [];
+    lines.push(`🍴 *Order Invoice: ${this.maskOrderId(order.id)}*`);
+    lines.push(``);
+
+    let subtotal = 0;
+    let totalTax = 0;
+
+    order.orderItems.forEach((item: any) => {
+      const itemPrice = Number(item.unitPrice);
+      const itemSubtotal = itemPrice * item.quantity;
+      const itemTax = Number(item.taxAmount);
+      
+      subtotal += itemSubtotal;
+      totalTax += itemTax;
+
+      lines.push(`- ${item.product.name} x${item.quantity}: ${formatInr(itemSubtotal)} ${itemTax > 0 ? `(Tax: ${formatInr(itemTax)})` : '(No Tax)'}`);
+    });
+
+    lines.push(``);
+    lines.push(`-------------------------`);
+    lines.push(`Subtotal: ${formatInr(subtotal)}`);
+    if (totalTax > 0) lines.push(`Total Tax: ${formatInr(totalTax)}`);
+    if (discount > 0) lines.push(`Discount: -${formatInr(discount)}`);
+    lines.push(`-------------------------`);
+    lines.push(`*TOTAL: ${formatInr(Number(order.totalAmount))}*`);
+
+    if (notes) {
+      lines.push(``);
+      lines.push(`Notes: ${notes}`);
+    }
+    
+    lines.push(`-------------------------`);
+    lines.push(`Thank you for ordering!`);
+
+    return lines.join('\n');
+  }
+
+  async createManualOrder(tenantId: string, customerPhone: string, items: Array<{ productId: string; quantity: number; taxRate?: number }>, discount: number = 0, notes?: string) {
     return this.prisma.$transaction(async (tx) => {
       const tenant = await tx.tenant.findUnique({ where: { id: tenantId } });
       const defaultRate = Number(this.configService.get('DEFAULT_TAX_RATE')) || 0.05;
-      const taxRate = tenant?.taxRate ? Number(tenant.taxRate) : defaultRate;
+      const tenantTaxRate = tenant?.taxRate ? Number(tenant.taxRate) : defaultRate;
 
       // 1. Create the base order
       const order = await tx.order.create({
@@ -480,18 +518,22 @@ export class OrderService {
           totalAmount: 0, 
           paymentMethod: PaymentMethod.COD,
           source: 'MANUAL',
+          discountAmount: discount,
+          notes,
         },
       });
 
       // 2. Fetch products and create items
-      let totalAmount = 0;
+      let subtotalPlusTax = 0;
       for (const itemInput of items) {
         const product = await tx.product.findUnique({ where: { id: itemInput.productId } });
         if (!product || product.tenantId !== tenantId) continue;
 
-        const subtotal = Number(product.price) * itemInput.quantity;
-        const tax = subtotal * taxRate;
-        totalAmount += subtotal + tax;
+        const itemSubtotal = Number(product.price) * itemInput.quantity;
+        const itemTaxRate = (itemInput.taxRate !== undefined && itemInput.taxRate !== null) ? itemInput.taxRate : tenantTaxRate;
+        const itemTax = itemSubtotal * itemTaxRate;
+        
+        subtotalPlusTax += itemSubtotal + itemTax;
 
         await tx.orderItem.create({
           data: {
@@ -499,10 +541,12 @@ export class OrderService {
             productId: product.id,
             quantity: itemInput.quantity,
             unitPrice: product.price,
-            taxAmount: tax,
+            taxAmount: itemTax,
           },
         });
       }
+
+      const totalAmount = Math.max(0, subtotalPlusTax - discount);
 
       // 3. Update total
       const finalizedOrder = await tx.order.update({
@@ -517,8 +561,8 @@ export class OrderService {
       this.eventsGateway.emitNewOrder(tenantId, finalizedOrder);
 
       // 5. Send WhatsApp Message
-      const confirmationMsg = `🍴 *New Order Placed by Staff*\n\nYour order has been placed successfully by our team.\n\n*Order ID:* ${this.maskOrderId(finalizedOrder.id)}\n*Total:* ${formatInr(totalAmount)}\n\nThank you!`;
-      await this.whatsAppService.sendTextMessage(tenantId, customerPhone, confirmationMsg);
+      const invoiceMsg = this.formatDetailedInvoice(finalizedOrder, discount, notes);
+      await this.whatsAppService.sendTextMessage(tenantId, customerPhone, invoiceMsg);
 
       return finalizedOrder;
     });

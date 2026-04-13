@@ -1,7 +1,7 @@
 import { Controller, Post, UseInterceptors, UploadedFile, UseGuards, BadRequestException } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
-import { extname } from 'path';
+import { extname, join } from 'path';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { existsSync, mkdirSync } from 'fs';
 
@@ -13,9 +13,9 @@ export class UploadController {
     FileInterceptor('file', {
       storage: diskStorage({
         destination: (req, file, cb) => {
-          const uploadPath = './uploads';
+          const uploadPath = join(process.cwd(), 'uploads');
           if (!existsSync(uploadPath)) {
-            mkdirSync(uploadPath);
+            mkdirSync(uploadPath, { recursive: true });
           }
           cb(null, uploadPath);
         },

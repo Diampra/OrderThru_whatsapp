@@ -60,7 +60,7 @@ export class DashboardController {
 
   @Roles(Role.TENANT_ADMIN)
   @Post('manual-order')
-  createManualOrder(@Req() req: any, @Body() body: { customerPhone: string; items: Array<{ productId: string; quantity: number }> }) {
-    return this.dashboardService.createManualOrder(req.user.tenantId, body.customerPhone, body.items);
+  createManualOrder(@Req() req: any, @Body() body: { customerPhone: string; items: Array<{ productId: string; quantity: number; taxRate?: number }>; discount?: number; notes?: string }) {
+    return this.dashboardService.createManualOrder(req.user.tenantId, body.customerPhone, body.items, body.discount, body.notes);
   }
 }

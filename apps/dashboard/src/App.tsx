@@ -27,6 +27,8 @@ type ProductFormState = {
   description: string;
   price: string;
   category: string;
+  isVeg: boolean;
+  taxRate: string;
   imageUrl: string;
   tags_raw: string;
   isAvailable: boolean;
@@ -38,6 +40,8 @@ const emptyProductForm: ProductFormState = {
   description: '',
   price: '',
   category: 'General',
+  isVeg: true,
+  taxRate: '5',
   imageUrl: '',
   tags_raw: '',
   isAvailable: true,
@@ -53,7 +57,7 @@ export default function App() {
   const [productForm, setProductForm] = useState<ProductFormState>(emptyProductForm);
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [editingTenant, setEditingTenant] = useState<Tenant | null>(null);
-  const [activeTab, setActiveTab]= useState<'dashboard' | 'settings'>('dashboard');
+  const [activeTab, setActiveTab]= useState<'dashboard' | 'pos' | 'settings'>('dashboard');
   const [localSchema, setLocalSchema] = useState<ProductSchemaItem[]>([]);
   
   const token = window.localStorage.getItem('restaurant_admin_token');
@@ -72,11 +76,24 @@ export default function App() {
   const [chatInput, setChatInput] = useState('');
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
-  // Manual Order state
+  // POS / Manual Order state
+  type PosItem = {
+    productId: string;
+    quantity: number;
+    taxEnabled: boolean;
+    taxRate: number; // 0.05 = 5%
+  };
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
   const [manualPhone, setManualPhone] = useState('');
-  const [manualItems, setManualItems] = useState<{productId: string, quantity: number}[]>([]);
+  const [manualItems, setManualItems] = useState<{productId: string, quantity: number, taxRate?: number}[]>([]);
   
+  const [posItems, setPosItems] = useState<PosItem[]>([]);
+  const [posPhone, setPosPhone] = useState('');
+  const [posSearch, setPosSearch] = useState('');
+  const [posDiscount, setPosDiscount] = useState<string>(''); // Flat amount string
+  const [posNotes, setPosNotes] = useState('');
+  const [posPaymentMethod, setPosPaymentMethod] = useState<'COD' | 'ONLINE'>('COD');
+
   // Toast state
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
@@ -155,6 +172,20 @@ export default function App() {
         queryClient.invalidateQueries({ queryKey: ['staff-alerts'] });
         if (selectedPhone) {
           queryClient.invalidateQueries({ queryKey: ['chat-history', selectedPhone] });
+        }
+      });
+
+      socket.on('message.received', (data: { customerPhone: string, sender: string, content: string }) => {
+        // Play notification sound only for incoming customer messages
+        if (data.sender === 'USER') {
+          const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+          audio.play().catch(e => console.error('Audio playback failed:', e));
+        }
+        
+        // Refresh conversations and history
+        queryClient.invalidateQueries({ queryKey: ['conversations'] });
+        if (selectedPhone === data.customerPhone) {
+          queryClient.invalidateQueries({ queryKey: ['chat-history', data.customerPhone] });
         }
       });
 
@@ -315,14 +346,22 @@ export default function App() {
   }, [chatHistoryQuery.data, selectedPhone]);
 
   const manualOrderMutation = useMutation({
-    mutationFn: async ({ customerPhone, items }: { customerPhone: string; items: any[] }) =>
-      api.post('/dashboard/manual-order', { customerPhone, items }),
+    mutationFn: async ({ customerPhone, items, discount, notes }: { customerPhone: string; items: any[]; discount?: number; notes?: string }) =>
+      api.post('/dashboard/manual-order', { customerPhone, items, discount, notes }),
     onSuccess: () => {
       setIsManualModalOpen(false);
       setManualPhone('');
       setManualItems([]);
-      showToast('Manual order placed successfully! 🛒');
+      
+      setPosItems([]);
+      setPosPhone('');
+      setPosDiscount('');
+      setPosNotes('');
+      
+      showToast('Order placed successfully! 🛒');
       queryClient.invalidateQueries({ queryKey: ['orders'] });
+      queryClient.invalidateQueries({ queryKey: ['summary'] });
+      queryClient.invalidateQueries({ queryKey: ['conversations'] });
     },
     onError: (err: any) => {
       alert('Failed to place manual order: ' + (err.response?.data?.message || err.message));
@@ -340,12 +379,15 @@ export default function App() {
 
   const productMutation = useMutation({
     mutationFn: async () => {
-      const { name, description, price, category, attributes } = productForm;
+      const { name, description, price, category, isVeg, taxRate, imageUrl, attributes } = productForm;
       const payload = {
         name,
         description,
         price: Number(price),
         category,
+        isVeg,
+        taxRate: Number(taxRate) / 100, // Convert e.g. 5 to 0.05
+        imageUrl,
         attributes,
         tags: productForm.tags_raw.split(',').map(t => t.trim()).filter(Boolean),
       };
@@ -830,6 +872,10 @@ export default function App() {
                   className={`pb-4 text-sm font-medium transition-colors ${activeTab === 'dashboard' ? 'text-white border-b-2 border-ember' : 'text-white/40 hover:text-white/60'}`}
                  >Dashboard</button>
                  <button 
+                  onClick={() => setActiveTab('pos')}
+                  className={`pb-4 text-sm font-medium transition-colors ${activeTab === 'pos' ? 'text-white border-b-2 border-ember' : 'text-white/40 hover:text-white/60'}`}
+                 >POS (New Order)</button>
+                 <button 
                   onClick={() => setActiveTab('settings')}
                   className={`pb-4 text-sm font-medium transition-colors ${activeTab === 'settings' ? 'text-white border-b-2 border-ember' : 'text-white/40 hover:text-white/60'}`}
                  >Business Settings</button>
@@ -943,10 +989,14 @@ export default function App() {
                           </div>
                           <div className="flex items-center gap-2">
                             <button
-                              onClick={() => setIsManualModalOpen(true)}
-                              className="text-[10px] font-bold bg-indigo-50 text-indigo-600 border border-indigo-100 px-3 py-1.5 rounded-lg hover:bg-indigo-100 transition-all"
+                              onClick={() => {
+                                setPosPhone(selectedPhone);
+                                setPosItems([]);
+                                setActiveTab('pos');
+                              }}
+                              className="text-[10px] font-bold bg-indigo-50 text-indigo-600 border border-indigo-100 px-3 py-1.5 rounded-lg hover:bg-indigo-100 transition-all font-display"
                             >
-                              📦 Manual Order
+                              📦 Start POS Order
                             </button>
                             {(conversationsQuery.data?.find(c => c.customerPhone === selectedPhone)?.unresolvedAlertCount ?? 0) > 0 && (
                               <button
@@ -1185,17 +1235,54 @@ export default function App() {
                     required
                   />
 
-                  <select
-                    className="rounded-2xl border border-slate-200 px-4 py-3 shadow-sm outline-none focus:border-ember bg-white"
-                    value={productForm.category}
-                    onChange={(e) => setProductForm(c => ({ ...c, category: e.target.value }))}
-                    required
-                  >
-                    <option value="General">Select Category</option>
-                    {tenantQuery.data?.categories?.map(cat => (
-                      <option key={cat} value={cat}>{cat}</option>
-                    ))}
-                  </select>
+                  <div className="space-y-1">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-2 block">Default Tax Rate (%)</p>
+                    <input
+                      type="number"
+                      className="w-full rounded-2xl border border-slate-200 px-4 py-3 shadow-sm outline-none focus:border-ember"
+                      placeholder="Tax Rate (%) e.g. 5, 12, 18"
+                      value={productForm.taxRate}
+                      onChange={(event) => setProductForm((current) => ({ ...current, taxRate: event.target.value }))}
+                      required
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-2 block">Classification</p>
+                      <div className="flex bg-slate-100 rounded-2xl p-1.5 h-[53px]">
+                         <button 
+                           type="button"
+                           className={`flex-1 rounded-xl text-[10px] font-bold flex items-center justify-center gap-2 transition-all ${productForm.isVeg ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                           onClick={() => setProductForm(c => ({ ...c, isVeg: true }))}
+                         >
+                           <span className={`w-2 h-2 rounded-full ${productForm.isVeg ? 'bg-emerald-500' : 'bg-slate-300'}`} /> VEG
+                         </button>
+                         <button 
+                           type="button"
+                           className={`flex-1 rounded-xl text-[10px] font-bold flex items-center justify-center gap-2 transition-all ${!productForm.isVeg ? 'bg-white text-rose-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                           onClick={() => setProductForm(c => ({ ...c, isVeg: false }))}
+                         >
+                           <span className={`w-2 h-2 rounded-full ${!productForm.isVeg ? 'bg-rose-500' : 'bg-slate-300'}`} /> NON-VEG
+                         </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-2 block">Category</p>
+                      <select
+                        className="w-full rounded-2xl border border-slate-200 px-4 py-3 h-[53px] shadow-sm outline-none focus:border-ember bg-white text-sm font-medium"
+                        value={productForm.category}
+                        onChange={(e) => setProductForm(c => ({ ...c, category: e.target.value }))}
+                        required
+                      >
+                        <option value="General">Select Category</option>
+                        {tenantQuery.data?.categories?.map(cat => (
+                          <option key={cat} value={cat}>{cat}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
 
                   <div className="space-y-2">
                     <p className="text-xs text-slate-500 mb-1 ml-2">Product Image</p>
@@ -1317,45 +1404,74 @@ export default function App() {
 
                 <div className="mt-6 space-y-3">
                   {productQuery.data?.map((p) => (
-                    <div key={p.id} className="rounded-[1.5rem] border border-slate-100 p-4 hover:bg-slate-50 transition">
+                    <div key={p.id} className="rounded-[1.5rem] border border-slate-100 p-4 hover:bg-slate-50 transition group">
                       <div className="flex items-start justify-between gap-4">
-                        <div>
-                          <p className="font-medium text-ink">{p.name}</p>
-                          <p className="mt-1 text-sm text-slate-500 italic">{formatPrice(p.price)}</p>
+                        <div className="flex items-center gap-4">
+                          <div className="w-14 h-14 rounded-2xl bg-slate-100 overflow-hidden flex-shrink-0 relative">
+                            {p.imageUrl ? (
+                              <img 
+                                src={p.imageUrl.startsWith('http') ? p.imageUrl : `${api.defaults.baseURL}${p.imageUrl}`} 
+                                className="w-full h-full object-cover" 
+                                alt={p.name} 
+                              />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center text-slate-300 text-xl">
+                                🍴
+                              </div>
+                            )}
+                            <div className={`absolute top-1 right-1 w-2.5 h-2.5 rounded-full border-2 border-white shadow-sm ${p.isVeg ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2 mb-0.5">
+                              <p className="font-bold text-ink">{p.name}</p>
+                              <span className={`text-[8px] font-black px-1.5 py-0.5 rounded border ${p.isVeg ? 'border-emerald-200 text-emerald-600 bg-emerald-50' : 'border-rose-200 text-rose-600 bg-rose-50'}`}>
+                                {p.isVeg ? 'VEG' : 'NON-VEG'}
+                              </span>
+                            </div>
+                            <p className="text-sm font-bold text-ember">{formatPrice(p.price)}</p>
+                          </div>
                         </div>
                         <div className="flex gap-2">
                           <button
-                            className="rounded-full border border-slate-200 px-3 py-2 text-xs"
+                            className="w-10 h-10 rounded-xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-ink hover:border-ink transition-all"
                             onClick={() => {
                               setEditingProductId(p.id);
                               setProductForm({
                                 name: p.name,
                                 description: p.description,
                                 price: p.price,
+                                isVeg: p.isVeg,
+                                taxRate: (Number(p.taxRate) * 100).toString(),
                                 isAvailable: p.isAvailable,
                                 attributes: p.attributes || {},
                                 category: p.category || 'General',
                                 imageUrl: p.imageUrl || '',
-                                tags_raw: p.tags?.join(', ') || '',
+                                tags_raw: (p.tags as string[])?.join(', ') || '',
                               });
                             }}
-                          >Edit</button>
+                            title="Edit Product"
+                          >
+                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                          </button>
                           <button
-                            className="rounded-full border border-red-200 px-3 py-2 text-xs text-red-600 font-medium hover:bg-red-50 transition-colors"
+                            className="w-10 h-10 rounded-xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-rose-600 hover:border-rose-200 transition-all"
                             onClick={() => {
                               if (confirm('Are you sure you want to delete this product?')) {
                                 deleteProductMutation.mutate(p.id);
                               }
                             }}
-                          >Delete</button>
+                            title="Delete Product"
+                          >
+                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                          </button>
                         </div>
                       </div>
-                      <div className="flex gap-2 mt-2">
-                        <span className="text-[10px] font-bold px-2 py-0.5 bg-slate-100 text-slate-500 rounded-md">
+                      <div className="flex flex-wrap gap-2 mt-3">
+                        <span className="text-[9px] font-bold px-2 py-1 bg-slate-100 text-slate-500 rounded-lg uppercase tracking-wider">
                           {p.category}
                         </span>
-                        {p.tags?.map(tag => (
-                          <span key={tag} className="text-[10px] font-bold px-2 py-0.5 bg-indigo-50 text-indigo-500 rounded-md">
+                        {(p.tags as string[] | undefined)?.map(tag => (
+                          <span key={tag} className="text-[9px] font-bold px-2 py-1 bg-indigo-50 text-indigo-500 rounded-lg uppercase tracking-wider">
                             {tag}
                           </span>
                         ))}
@@ -1366,6 +1482,302 @@ export default function App() {
               </article>
             </section>
           </>
+        ) : activeTab === 'pos' ? (
+          <section className="mt-6 flex flex-col lg:flex-row gap-6 items-stretch min-h-[700px] animate-in fade-in slide-in-from-bottom-4 duration-500">
+            {/* Left: Product Selection */}
+            <article className="lg:w-3/5 rounded-[2rem] bg-indigo-50/20 p-8 shadow-panel border border-indigo-100/50 flex flex-col">
+               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+                 <div>
+                   <h2 className="font-display text-3xl text-ink">Storefront Catalog</h2>
+                   <p className="text-sm text-slate-500 mt-1">Select products to build a comprehensive order.</p>
+                 </div>
+                 <div className="relative w-full md:w-64">
+                   <input 
+                     type="text"
+                     placeholder="Search or category..."
+                     className="w-full bg-white border border-slate-200 rounded-2xl pl-10 pr-4 py-3 text-sm outline-none focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 transition-all shadow-sm"
+                     value={posSearch}
+                     onChange={(e) => setPosSearch(e.target.value)}
+                   />
+                   <span className="absolute left-4 top-3.5 text-slate-400">🔍</span>
+                 </div>
+               </div>
+
+               <div className="flex gap-2 mb-6 overflow-x-auto pb-2 scrollbar-hide">
+                 <button 
+                  onClick={() => setPosSearch('')}
+                  className={`px-5 py-2 rounded-full text-xs font-bold whitespace-nowrap transition-all ${!posSearch ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100' : 'bg-white text-slate-500 border border-slate-200 hover:border-indigo-300'}`}
+                 >
+                   All Items
+                 </button>
+                 {tenantQuery.data?.categories?.map((cat: string) => (
+                    <button 
+                      key={cat}
+                      onClick={() => setPosSearch(cat)}
+                      className={`px-5 py-2 rounded-full text-xs font-bold whitespace-nowrap transition-all ${posSearch === cat ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100' : 'bg-white text-slate-500 border border-slate-200 hover:border-indigo-300'}`}
+                    >
+                      {cat}
+                    </button>
+                 ))}
+               </div>
+
+               <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4 overflow-y-auto pr-2 max-h-[600px] scrollbar-hide">
+                 {productsQuery.data?.filter(p => p.isAvailable && (p.name.toLowerCase().includes(posSearch.toLowerCase()) || p.category.toLowerCase().includes(posSearch.toLowerCase()))).map(product => {
+                    const inCart = posItems.find(i => i.productId === product.id);
+                    return (
+                      <div key={product.id} className="group relative bg-white p-5 rounded-[2.5rem] border border-slate-100 shadow-sm hover:shadow-2xl hover:border-indigo-200 transition-all cursor-pointer flex gap-5 items-center"
+                           onClick={() => {
+                             if (!inCart) {
+                               setPosItems(curr => [...curr, { 
+                                 productId: product.id, 
+                                 quantity: 1, 
+                                 taxEnabled: true, 
+                                 taxRate: Number(product.taxRate || tenantQuery.data?.taxRate || 0.05) 
+                               }]);
+                             }
+                           }}>
+                        <div className="w-20 h-20 rounded-3xl overflow-hidden bg-slate-50 flex-shrink-0 border border-slate-50 relative">
+                          {product.imageUrl ? (
+                            <img 
+                              src={product.imageUrl.startsWith('http') ? product.imageUrl : `${api.defaults.baseURL}${product.imageUrl}`} 
+                              className="w-full h-full object-cover" 
+                            />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center text-slate-200 text-3xl font-display">
+                              🍴
+                            </div>
+                          )}
+                          <div className={`absolute top-1.5 right-1.5 w-3 h-3 rounded-full border-2 border-white shadow-sm ${product.isVeg ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <h4 className="font-bold text-ink text-base truncate">{product.name}</h4>
+                          <p className="text-indigo-600 font-display font-bold text-lg mt-0.5">{formatPrice(product.price)}</p>
+                          <div className="flex items-center gap-2 mt-1.5">
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest bg-slate-50 px-2 py-0.5 rounded-md border border-slate-100">{product.category}</span>
+                          </div>
+                        </div>
+                        <div className="absolute top-6 right-6 translate-x-1 -translate-y-1 opacity-0 group-hover:opacity-100 transition-all scale-90 group-hover:scale-100">
+                           <div className="w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center shadow-xl font-bold">+</div>
+                        </div>
+                        {inCart && (
+                           <div className="absolute inset-0 bg-indigo-600/10 border-2 border-indigo-600 rounded-[2.5rem] flex items-center justify-center backdrop-blur-[1px] animate-in zoom-in duration-200">
+                             <div className="bg-indigo-600 text-white text-[11px] font-bold px-4 py-1.5 rounded-full shadow-xl flex items-center gap-2">
+                               <span>✅</span>
+                               <span>ADDED {inCart.quantity > 1 ? `(${inCart.quantity})` : ''}</span>
+                             </div>
+                           </div>
+                        )}
+                      </div>
+                    );
+                 })}
+               </div>
+            </article>
+
+            {/* Right: Checkout Cart */}
+            <article className="lg:w-2/5 rounded-[2rem] bg-white p-8 shadow-panel border border-slate-100 flex flex-col relative overflow-hidden">
+               <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-50/50 rounded-bl-[100%] z-0 pointer-events-none" />
+               
+               <div className="flex items-center justify-between mb-8 relative z-10">
+                 <h3 className="font-display text-2xl text-ink">Order Summary</h3>
+                 <button 
+                  onClick={() => { setPosItems([]); setPosPhone(''); setPosDiscount(''); }}
+                  className="text-[10px] font-bold text-slate-400 hover:text-red-500 transition-colors uppercase tracking-widest"
+                 >Reset Cart</button>
+               </div>
+
+               <div className="space-y-6 flex-1 overflow-y-auto px-1 scrollbar-hide relative z-10">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Customer Phone</label>
+                    <div className="flex gap-2">
+                      <input 
+                        type="text"
+                        placeholder="e.g. 919876543210"
+                        className="flex-1 bg-slate-50 border border-slate-100 rounded-2xl px-4 py-3.5 text-sm outline-none focus:bg-white focus:border-indigo-600 transition-all font-bold shadow-sm"
+                        value={posPhone}
+                        onChange={(e) => setPosPhone(e.target.value)}
+                      />
+                      <button 
+                        className="bg-white text-indigo-600 px-5 rounded-2xl text-xs font-bold hover:bg-indigo-50 transition-all border border-indigo-100 shadow-sm"
+                        onClick={() => {
+                          const lastConversation = conversationsQuery.data?.[0];
+                          if (lastConversation) setPosPhone(lastConversation.customerPhone);
+                        }}
+                      >Recent 👤</button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4">
+                     <div className="flex items-center justify-between ml-1">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Cart Items ({posItems.length})</label>
+                        {posItems.length > 0 && (
+                           <span className="text-[10px] font-bold text-indigo-600">Total Weight: {posItems.reduce((acc, i) => acc + i.quantity, 0)} units</span>
+                        )}
+                     </div>
+                     {posItems.length === 0 ? (
+                       <div className="py-20 text-center border-2 border-dashed border-slate-100 rounded-[2.5rem] bg-slate-50/50">
+                         <p className="text-slate-300 text-sm font-medium">Select items from catalog to start</p>
+                       </div>
+                     ) : (
+                       <div className="grid gap-3">
+                         {posItems.map(item => {
+                            const p = productsQuery.data?.find(pr => pr.id === item.productId);
+                            if (!p) return null;
+                            return (
+                              <div key={item.productId} className="bg-slate-50/70 p-5 rounded-3xl space-y-4 border border-slate-100 shadow-sm animate-in slide-in-from-right-2 duration-300">
+                                <div className="flex justify-between items-start">
+                                  <div className="min-w-0">
+                                    <h5 className="font-bold text-sm text-ink truncate">{p.name}</h5>
+                                    <p className="text-xs text-slate-500 font-medium">{formatPrice(p.price)} per unit</p>
+                                  </div>
+                                  <button 
+                                    className="w-8 h-8 flex items-center justify-center rounded-full bg-white text-slate-300 hover:text-red-500 hover:bg-red-50 transition-all shadow-sm"
+                                    onClick={() => setPosItems(curr => curr.filter(i => i.productId !== item.productId))}
+                                  >✕</button>
+                                </div>
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                                   <div className="flex items-center bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm self-start">
+                                      <button 
+                                        className="px-4 py-2 hover:bg-slate-50 text-slate-500 font-bold transition-colors"
+                                        onClick={() => setPosItems(curr => curr.map(i => i.productId === item.productId ? {...i, quantity: Math.max(1, i.quantity - 1)} : i))}
+                                      >-</button>
+                                      <span className="w-10 text-center text-sm font-bold border-x border-slate-50 py-2">{item.quantity}</span>
+                                      <button 
+                                        className="px-4 py-2 hover:bg-slate-50 text-slate-500 font-bold transition-colors"
+                                        onClick={() => setPosItems(curr => curr.map(i => i.productId === item.productId ? {...i, quantity: i.quantity + 1} : i))}
+                                      >+</button>
+                                   </div>
+                                   <div className="flex items-center gap-3">
+                                      <div className="flex items-center gap-2">
+                                        <button 
+                                          className={`w-11 h-6 rounded-full transition-all relative flex items-center px-1.5 ${item.taxEnabled ? 'bg-indigo-600' : 'bg-slate-300'}`}
+                                          onClick={() => setPosItems(curr => curr.map(i => i.productId === item.productId ? {...i, taxEnabled: !item.taxEnabled} : i))}
+                                        >
+                                          <div className={`w-3.5 h-3.5 bg-white rounded-full shadow-md transition-all ${item.taxEnabled ? 'translate-x-4.5' : 'translate-x-0'}`} />
+                                        </button>
+                                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-tighter">Tax</span>
+                                      </div>
+                                      {item.taxEnabled && (
+                                        <div className="flex items-center bg-white border border-indigo-100 rounded-xl px-2.5 py-1 shadow-sm">
+                                          <input 
+                                            type="number"
+                                            className="w-8 text-center text-xs font-bold text-indigo-600 bg-transparent outline-none"
+                                            value={Math.round(item.taxRate * 100)}
+                                            onChange={(e) => {
+                                              const val = parseFloat(e.target.value) / 100;
+                                              setPosItems(curr => curr.map(i => i.productId === item.productId ? {...i, taxRate: isNaN(val) ? 0 : val} : i));
+                                            }}
+                                          />
+                                          <span className="text-[10px] font-bold text-indigo-400 font-display">%</span>
+                                        </div>
+                                      )}
+                                   </div>
+                                </div>
+                              </div>
+                            );
+                         })}
+                       </div>
+                     )}
+                  </div>
+
+                  <div className="space-y-4 pt-4 border-t border-slate-100">
+                     <div className="flex flex-col sm:flex-row gap-4">
+                        <div className="flex-1 space-y-1">
+                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Apply Discount (₹)</label>
+                          <div className="relative">
+                            <input 
+                              type="number"
+                              placeholder="0"
+                              className="w-full bg-slate-50 border border-slate-100 rounded-2xl pl-8 pr-4 py-3.5 text-sm font-bold text-red-600 outline-none focus:bg-white focus:border-red-600 transition-all"
+                              value={posDiscount}
+                              onChange={(e) => setPosDiscount(e.target.value)}
+                            />
+                            <span className="absolute left-3.5 top-3.5 text-red-400">₹</span>
+                          </div>
+                        </div>
+                        <div className="flex-1 space-y-1">
+                           <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Payment Method</label>
+                           <div className="flex bg-slate-100 rounded-2xl p-1.5 h-[53px]">
+                              <button 
+                                className={`flex-1 rounded-xl text-[10px] font-bold transition-all ${posPaymentMethod === 'COD' ? 'bg-white text-ink shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                                onClick={() => setPosPaymentMethod('COD')}
+                              >CASH / COD</button>
+                              <button 
+                                className={`flex-1 rounded-xl text-[10px] font-bold transition-all ${posPaymentMethod === 'ONLINE' ? 'bg-white text-ink shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                                onClick={() => setPosPaymentMethod('ONLINE')}
+                              >ONLINE / UPI</button>
+                           </div>
+                        </div>
+                     </div>
+                     <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Order Notes / Special Instructions</label>
+                        <textarea 
+                          placeholder="e.g. Extra spicy, less salt, deliver to gate 4..."
+                          className="w-full bg-slate-50 border border-slate-100 rounded-2xl px-4 py-3 text-sm outline-none focus:bg-white focus:border-indigo-600 transition-all resize-none h-16"
+                          value={posNotes}
+                          onChange={(e) => setPosNotes(e.target.value)}
+                        />
+                     </div>
+                  </div>
+               </div>
+
+               <div className="pt-8 border-t border-slate-100 space-y-5 relative z-10">
+                 <div className="space-y-3">
+                    <div className="flex justify-between text-sm font-medium text-slate-500">
+                      <span>Subtotal</span>
+                      <span className="text-ink font-bold">{formatPrice(posItems.reduce((acc, i) => acc + (Number(productsQuery.data?.find(p => p.id === i.productId)?.price || 0) * i.quantity), 0))}</span>
+                    </div>
+                    <div className="flex justify-between text-sm font-medium text-slate-500">
+                      <span>Total Tax</span>
+                      <span className="text-indigo-600 font-bold">+{formatPrice(posItems.reduce((acc, i) => {
+                        const price = Number(productsQuery.data?.find(p => p.id === i.productId)?.price || 0);
+                        return acc + (i.taxEnabled ? (price * i.quantity * i.taxRate) : 0);
+                      }, 0))}</span>
+                    </div>
+                    {Number(posDiscount) > 0 && (
+                      <div className="flex justify-between text-sm font-bold text-red-500 animate-in fade-in duration-300">
+                        <span>Discount</span>
+                        <span>- {formatPrice(posDiscount)}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between text-3xl font-display font-bold text-ink pt-3 border-t border-slate-50">
+                      <span>Net Total</span>
+                      <span className="text-indigo-600">{formatPrice(Math.max(0, posItems.reduce((acc, i) => {
+                        const price = Number(productsQuery.data?.find(p => p.id === i.productId)?.price || 0);
+                        const tax = i.taxEnabled ? (price * i.quantity * i.taxRate) : 0;
+                        return acc + (price * i.quantity) + tax;
+                      }, -Number(posDiscount))))}</span>
+                    </div>
+                 </div>
+
+                 <button 
+                   className="w-full bg-ink text-white py-5 rounded-[2rem] font-bold text-sm shadow-2xl shadow-slate-200 hover:bg-slate-800 transition-all disabled:opacity-40 disabled:scale-100 active:scale-95 group overflow-hidden relative"
+                   disabled={!posPhone || posItems.length === 0 || manualOrderMutation.isPending}
+                   onClick={() => manualOrderMutation.mutate({ 
+                     customerPhone: posPhone, 
+                     items: posItems.map(i => ({ productId: i.productId, quantity: i.quantity, taxRate: i.taxEnabled ? i.taxRate : 0 })),
+                     discount: Number(posDiscount),
+                     notes: posNotes
+                   })}
+                 >
+                   <span className="relative z-10 flex items-center justify-center gap-3">
+                     {manualOrderMutation.isPending ? (
+                       <>
+                         <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                         Finalizing...
+                       </>
+                     ) : (
+                       <>
+                         Place Multi-Item Order 🛍️
+                       </>
+                     )}
+                   </span>
+                   {manualOrderMutation.isPending && (
+                     <div className="absolute inset-0 bg-indigo-600 animate-pulse transition-all" />
+                   )}
+                 </button>
+               </div>
+            </article>
+          </section>
         ) : (
           <section className="mt-6 grid gap-6 lg:grid-cols-2">
              <article className="rounded-[2rem] bg-white p-8 shadow-panel col-span-full">
@@ -1517,101 +1929,6 @@ export default function App() {
             ))}
           </div>
         </section>
-
-      {/* Manual Order Modal */}
-      {isManualModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/50 backdrop-blur-sm p-4">
-          <div className="w-full max-w-lg bg-white rounded-[2.5rem] p-8 shadow-2xl animate-in fade-in zoom-in duration-300">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="font-display text-2xl text-ink">Manual Order Placement</h2>
-              <button 
-                onClick={() => setIsManualModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              <div>
-                <label className="block text-[10px] font-bold text-slate-400 uppercase ml-1 mb-1">Customer Phone Number</label>
-                <input 
-                  className="w-full rounded-2xl border border-slate-200 px-4 py-3 outline-none focus:border-indigo-600"
-                  placeholder="e.g. 919876543210"
-                  value={manualPhone}
-                  onChange={e => setManualPhone(e.target.value)}
-                />
-              </div>
-
-              <div>
-                <label className="block text-[10px] font-bold text-slate-400 uppercase ml-1 mb-1">Select Products</label>
-                <div className="max-h-56 overflow-y-auto border border-slate-100 rounded-2xl p-2 space-y-2">
-                  {productsQuery.data?.filter(p => p.isAvailable).map(product => {
-                    const existing = manualItems.find(i => i.productId === product.id);
-                    return (
-                      <div key={product.id} className="flex items-center justify-between p-2 rounded-xl border border-slate-50 bg-slate-50/30">
-                        <span className="text-sm font-medium">{product.name} ({formatPrice(product.price)})</span>
-                        <div className="flex items-center gap-2">
-                           {existing ? (
-                             <>
-                               <button 
-                                 onClick={() => {
-                                   if (existing.quantity > 1) {
-                                     setManualItems(curr => curr.map(i => i.productId === product.id ? {...i, quantity: i.quantity - 1} : i));
-                                   } else {
-                                     setManualItems(curr => curr.filter(i => i.productId !== product.id));
-                                   }
-                                 }}
-                                 className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-slate-200 text-slate-600"
-                               >-</button>
-                               <span className="text-sm font-bold w-4 text-center">{existing.quantity}</span>
-                               <button 
-                                 onClick={() => {
-                                   if (existing.quantity < 10) {
-                                     setManualItems(curr => curr.map(i => i.productId === product.id ? {...i, quantity: i.quantity + 1} : i));
-                                   }
-                                 }}
-                                 className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-slate-200 text-slate-600"
-                               >+</button>
-                             </>
-                           ) : (
-                             <button 
-                               onClick={() => setManualItems(curr => [...curr, { productId: product.id, quantity: 1 }])}
-                               className="text-[10px] font-bold text-indigo-600 border border-indigo-100 bg-white px-3 py-1.5 rounded-lg"
-                             >
-                               ADD TO ORDER
-                             </button>
-                           )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="pt-4 border-t border-slate-100">
-                <div className="flex justify-between items-center mb-4 text-lg font-display font-bold">
-                  <span>Estimated Total (Incl. Tax)</span>
-                  <span>
-                    {formatPrice(manualItems.reduce((acc, item) => {
-                      const p = productsQuery.data?.find(pr => pr.id === item.productId);
-                      return acc + (Number(p?.price || 0) * item.quantity);
-                    }, 0) * 1.05)}
-                  </span>
-                </div>
-
-                <button 
-                  className="w-full bg-ink text-white py-4 rounded-2xl font-bold text-sm shadow-xl hover:bg-slate-800 transition-all disabled:opacity-50"
-                  disabled={!manualPhone || manualItems.length === 0 || manualOrderMutation.isPending}
-                  onClick={() => manualOrderMutation.mutate({ customerPhone: manualPhone, items: manualItems })}
-                >
-                  {manualOrderMutation.isPending ? 'Placing Order...' : 'Confirm & Place Order 🛒'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
         </div>
       </main>
 

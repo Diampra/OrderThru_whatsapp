@@ -19,6 +19,15 @@ export class CreateProductDto {
   category!: string;
 
   @IsOptional()
+  @IsBoolean()
+  isVeg?: boolean;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  taxRate?: number;
+
+  @IsOptional()
   @IsString()
   imageUrl?: string;
 

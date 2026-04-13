@@ -76,6 +76,8 @@ model Product {
   price       Decimal     @db.Decimal(10, 2)
   isAvailable Boolean     @default(true)
   category    String      @default("General")
+  isVeg       Boolean     @default(true)
+  taxRate     Decimal     @default(0.05) @db.Decimal(10, 2)
   imageUrl    String?
   tags        Json?
   attributes  Json?
@@ -102,6 +104,8 @@ model Order {
   pendingReviewRating Int?
   createdAt           DateTime                 @default(now())
   updatedAt           DateTime                 @updatedAt
+  discountAmount      Decimal                  @default(0) @db.Decimal(10, 2)
+  notes               String?
   source              OrderSource              @default(BOT)
   tenant              Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   orderItems          OrderItem[]

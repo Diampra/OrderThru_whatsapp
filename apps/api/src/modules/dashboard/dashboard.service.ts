@@ -132,7 +132,7 @@ export class DashboardService {
     return this.whatsappService.sendTextMessage(tenantId, customerPhone, message, 'STAFF');
   }
 
-  async createManualOrder(tenantId: string, customerPhone: string, items: Array<{ productId: string; quantity: number }>) {
-    return this.orderService.createManualOrder(tenantId, customerPhone, items);
+  async createManualOrder(tenantId: string, customerPhone: string, items: Array<{ productId: string; quantity: number; taxRate?: number }>, discount?: number, notes?: string) {
+    return this.orderService.createManualOrder(tenantId, customerPhone, items, discount, notes);
   }
 }

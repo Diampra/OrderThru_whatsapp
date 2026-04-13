@@ -11,7 +11,7 @@ async function bootstrap() {
   const dashboardBaseUrl = configService.get<string>('DASHBOARD_BASE_URL') ?? 'http://localhost:5173';
   const port = configService.get<number>('PORT') ?? 4000;
 
-  app.useStaticAssets(join(__dirname, '..', 'uploads'), {
+  app.useStaticAssets(join(process.cwd(), 'uploads'), {
     prefix: '/uploads/',
   });
 

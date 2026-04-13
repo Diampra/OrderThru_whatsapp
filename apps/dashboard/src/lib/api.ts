@@ -69,6 +69,8 @@ export type Product = {
   imageUrl?: string;
   tags?: string[];
   isAvailable: boolean;
+  isVeg: boolean;
+  taxRate: string;
   attributes: Record<string, any> | null;
 };
 
