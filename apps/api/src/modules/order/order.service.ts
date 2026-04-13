@@ -405,6 +405,10 @@ export class OrderService {
     });
   }
 
+  private maskOrderId(id: string) {
+    return `#${id.slice(-7).toUpperCase()}`;
+  }
+
   async updateStatus(tenantId: string, orderId: string, status: OrderStatus) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
@@ -431,7 +435,7 @@ export class OrderService {
     await this.whatsAppService.sendTextMessage(
       tenantId,
       updated.customerPhone,
-      `Your order ${updated.id} is now ${updated.status}.`,
+      `Your order ${this.maskOrderId(updated.id)} is now ${updated.status}.`,
     );
 
     if (status === OrderStatus.COMPLETED) {
@@ -451,7 +455,7 @@ export class OrderService {
     const items = order.orderItems.map((orderItem) => orderItem.product.name).join(', ');
 
     return [
-      `Order confirmed: ${order.id}`,
+      `Order confirmed: ${this.maskOrderId(order.id)}`,
       `Items: ${items}`,
       `Total: ${formatInr(order.totalAmount)}`,
       `Status: ${order.status}`,
@@ -513,7 +517,7 @@ export class OrderService {
       this.eventsGateway.emitNewOrder(tenantId, finalizedOrder);
 
       // 5. Send WhatsApp Message
-      const confirmationMsg = `🍴 *New Order Placed by Staff*\n\nYour order has been placed successfully by our team.\n\n*Order ID:* ${finalizedOrder.id.slice(-6).toUpperCase()}\n*Total:* ${formatInr(totalAmount)}\n\nThank you!`;
+      const confirmationMsg = `🍴 *New Order Placed by Staff*\n\nYour order has been placed successfully by our team.\n\n*Order ID:* ${this.maskOrderId(finalizedOrder.id)}\n*Total:* ${formatInr(totalAmount)}\n\nThank you!`;
       await this.whatsAppService.sendTextMessage(tenantId, customerPhone, confirmationMsg);
 
       return finalizedOrder;

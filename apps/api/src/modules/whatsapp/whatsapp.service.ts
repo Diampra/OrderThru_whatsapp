@@ -379,11 +379,25 @@ export class WhatsAppService {
     const timestamp = new Date();
     const reason = `Unusual message from ${customerPhone}: "${rawText}"`;
 
-    // 1. Alert Staff Immediately
-    await this.prisma.staffAlert.create({
-      data: { tenantId, customerPhone, reason }
+    // 1. Deduplication: only alert if no alert was created for this customer in the last 2 minutes
+    const twoMinutesAgo = new Date(timestamp.getTime() - 2 * 60 * 1000);
+    const recentAlert = await this.prisma.staffAlert.findFirst({
+      where: {
+        tenantId,
+        customerPhone,
+        createdAt: { gte: twoMinutesAgo }
+      },
+      orderBy: { createdAt: 'desc' }
     });
-    this.eventsGateway.emitStaffNotification(tenantId, customerPhone, reason);
+
+    if (!recentAlert) {
+      await this.prisma.staffAlert.create({
+        data: { tenantId, customerPhone, reason }
+      });
+      this.eventsGateway.emitStaffNotification(tenantId, customerPhone, reason);
+    } else {
+      this.logger.debug(`Suppressing duplicate alert for ${customerPhone} — one already exists within 2 minutes.`);
+    }
 
     // 2. Schedule Bot Response (60s delay)
     setTimeout(async () => {

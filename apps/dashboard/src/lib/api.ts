@@ -118,3 +118,19 @@ export type StaffAlert = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type ChatMessage = {
+  id: string;
+  customerPhone: string;
+  sender: 'USER' | 'BOT' | 'STAFF' | 'SYSTEM';
+  content: string;
+  createdAt: string;
+};
+
+export type Conversation = {
+  customerPhone: string;
+  lastMessage: string;
+  lastMessageAt: string;
+  lastMessageSender: 'USER' | 'BOT' | 'STAFF';
+  unresolvedAlertCount: number;
+};

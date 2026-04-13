@@ -16,10 +16,32 @@ export class DashboardController {
     return this.dashboardService.getSummary(req.user.tenantId);
   }
 
+  // ── Conversations (new) ──────────────────────────────────────────────────────
+
+  @Roles(Role.TENANT_ADMIN)
+  @Get('conversations')
+  getConversations(@Req() req: any) {
+    return this.dashboardService.getConversations(req.user.tenantId);
+  }
+
+  @Roles(Role.TENANT_ADMIN)
+  @Get('conversations/:phone')
+  getChatHistory(@Req() req: any, @Param('phone') phone: string) {
+    return this.dashboardService.getChatHistory(req.user.tenantId, phone);
+  }
+
+  @Roles(Role.TENANT_ADMIN)
+  @Post('conversations/:phone/resolve')
+  resolveConversation(@Req() req: any, @Param('phone') phone: string) {
+    return this.dashboardService.resolveConversation(req.user.tenantId, phone);
+  }
+
+  // ── Legacy alerts (kept for backwards compat) ────────────────────────────────
+
   @Roles(Role.TENANT_ADMIN)
   @Get('alerts')
   getAlerts(@Req() req: any) {
-    return this.dashboardService.getAlerts(req.user.tenantId);
+    return this.dashboardService.getConversations(req.user.tenantId);
   }
 
   @Roles(Role.TENANT_ADMIN)
@@ -27,6 +49,8 @@ export class DashboardController {
   dismissAlert(@Req() req: any, @Param('id') id: string) {
     return this.dashboardService.dismissAlert(req.user.tenantId, id);
   }
+
+  // ── Reply & Manual Order ─────────────────────────────────────────────────────
 
   @Roles(Role.TENANT_ADMIN)
   @Post('reply')

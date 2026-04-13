@@ -1,7 +1,7 @@
-import { useState, useMemo, useEffect, Fragment } from 'react';
+import { useState, useMemo, useEffect, Fragment, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { io } from 'socket.io-client';
-import { api, type DashboardSummary, type Product, type Order, type Review, type Role, type Tenant, type ProductSchemaItem, type StaffAlert } from './lib/api';
+import { api, type DashboardSummary, type Product, type Order, type Review, type Role, type Tenant, type ProductSchemaItem, type StaffAlert, type ChatMessage, type Conversation } from './lib/api';
 
 const statusOptions = ['PENDING', 'PREPARING', 'READY', 'COMPLETED'] as const;
 
@@ -66,6 +66,11 @@ export default function App() {
   // Reply state
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
   const [replyMessage, setReplyMessage] = useState('');
+
+  // Chat conversation state
+  const [selectedPhone, setSelectedPhone] = useState<string | null>(null);
+  const [chatInput, setChatInput] = useState('');
+  const chatBottomRef = useRef<HTMLDivElement>(null);
 
   // Manual Order state
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
@@ -145,8 +150,12 @@ export default function App() {
       socket.on('staff.notification', () => {
         const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
         audio.play().catch(e => console.error('Audio playback failed:', e));
-        // Refresh alerts from DB
+        // Refresh conversations from DB
+        queryClient.invalidateQueries({ queryKey: ['conversations'] });
         queryClient.invalidateQueries({ queryKey: ['staff-alerts'] });
+        if (selectedPhone) {
+          queryClient.invalidateQueries({ queryKey: ['chat-history', selectedPhone] });
+        }
       });
 
       socket.on('order.created', (order: Order) => {
@@ -242,6 +251,20 @@ export default function App() {
     enabled: Boolean(token) && currentUser?.role === 'TENANT_ADMIN',
   });
 
+  const conversationsQuery = useQuery({
+    queryKey: ['conversations'],
+    queryFn: async () => (await api.get<Conversation[]>('/dashboard/conversations')).data,
+    enabled: Boolean(token) && currentUser?.role === 'TENANT_ADMIN',
+    refetchInterval: 15000,
+  });
+
+  const chatHistoryQuery = useQuery({
+    queryKey: ['chat-history', selectedPhone],
+    queryFn: async () => (await api.get<ChatMessage[]>(`/dashboard/conversations/${selectedPhone}`)).data,
+    enabled: Boolean(token) && Boolean(selectedPhone),
+    refetchInterval: 5000,
+  });
+
   const dismissAlertMutation = useMutation({
     mutationFn: async (alertId: string) =>
       api.patch(`/dashboard/alerts/${alertId}/dismiss`),
@@ -263,6 +286,33 @@ export default function App() {
       showToast('Failed to send reply. Please try again.', 'error');
     }
   });
+
+  const chatSendMutation = useMutation({
+    mutationFn: async ({ customerPhone, message }: { customerPhone: string; message: string }) =>
+      api.post('/dashboard/reply', { customerPhone, message }),
+    onSuccess: () => {
+      setChatInput('');
+      queryClient.invalidateQueries({ queryKey: ['chat-history', selectedPhone] });
+      queryClient.invalidateQueries({ queryKey: ['conversations'] });
+    },
+    onError: () => showToast('Failed to send message.', 'error'),
+  });
+
+  const resolveConversationMutation = useMutation({
+    mutationFn: async (phone: string) =>
+      api.post(`/dashboard/conversations/${phone}/resolve`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      showToast('Conversation resolved ✅');
+    },
+  });
+
+  // Auto-scroll chat to bottom when new messages arrive or conversation is selected
+  useEffect(() => {
+    if (chatBottomRef.current) {
+      chatBottomRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatHistoryQuery.data, selectedPhone]);
 
   const manualOrderMutation = useMutation({
     mutationFn: async ({ customerPhone, items }: { customerPhone: string; items: any[] }) =>
@@ -815,110 +865,184 @@ export default function App() {
             </section>
 
             <section className="mt-6 grid gap-6 xl:grid-cols-[1.4fr_1fr]">
-              <article className="rounded-[2rem] bg-white p-6 shadow-panel">
-                {(alertsQuery.data?.length ?? 0) > 0 && (
-                  <div className="mb-10 w-full">
-                    <div className="flex items-center justify-between mb-4">
-                      <div className="flex items-center gap-4">
-                        <h2 className="font-display text-3xl text-red-500">Staff Action Required</h2>
-                        <button 
-                          onClick={() => setIsManualModalOpen(true)}
-                          className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-xs font-bold shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all"
-                        >
-                          📦 Place Manual Order
-                        </button>
+
+              {/* ── Two-Panel Chat System ─────────────────────────────── */}
+              <article className="rounded-[2rem] bg-white shadow-panel overflow-hidden" style={{ minHeight: '520px' }}>
+                <div className="flex h-full" style={{ minHeight: '520px' }}>
+
+                  {/* Left Panel: Conversation List */}
+                  <div className="w-72 flex-shrink-0 border-r border-slate-100 flex flex-col">
+                    <div className="px-5 pt-5 pb-3 border-b border-slate-100">
+                      <div className="flex items-center justify-between">
+                        <h2 className="font-display text-xl text-ink">Conversations</h2>
+                        {(conversationsQuery.data?.reduce((s, c) => s + c.unresolvedAlertCount, 0) ?? 0) > 0 && (
+                          <span className="bg-red-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full animate-pulse">
+                            {conversationsQuery.data?.reduce((s, c) => s + c.unresolvedAlertCount, 0)} new
+                          </span>
+                        )}
                       </div>
-                      <span className="bg-red-100 text-red-600 px-3 py-1 rounded-full text-xs font-bold">
-                        {alertsQuery.data?.filter(a => !a.isDismissed).length} Pending
-                      </span>
                     </div>
-                    <div className="overflow-x-auto">
-                      <table className="min-w-full text-left text-sm">
-                        <thead className="text-slate-500">
-                          <tr>
-                            <th className="pb-3">Customer</th>
-                            <th className="pb-3">Message / Action</th>
-                            <th className="pb-3">Time</th>
-                            <th className="pb-3 text-right">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {alertsQuery.data?.map((alertItem) => (
-                            <div key={alertItem.id} style={{ display: 'contents' }}>
-                              <tr className={alertItem.isDismissed ? 'opacity-40' : 'bg-red-50/50'}>
-                                <td className="py-4 px-4 font-medium text-ink">
-                                  {alertItem.customerPhone}
-                                </td>
-                                <td className="py-4 pr-4">
-                                  <span className="font-semibold text-slate-700">{alertItem.reason}</span>
-                                </td>
-                                <td className="py-4 pr-4 text-[10px] text-slate-400">
-                                  {new Date(alertItem.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                  <div>{new Date(alertItem.createdAt).toLocaleDateString()}</div>
-                                </td>
-                                <td className="py-4 pr-4 text-right">
-                                  {alertItem.isDismissed ? (
-                                    <span className="text-xs text-slate-400 font-semibold">✅ Handled</span>
-                                  ) : (
-                                    <div className="flex items-center justify-end gap-2">
-                                      <button
-                                        className="text-xs bg-indigo-50 border border-indigo-100 px-4 py-2 rounded-xl text-indigo-600 font-bold hover:bg-indigo-100"
-                                        onClick={() => {
-                                          setReplyingTo(replyingTo === alertItem.id ? null : alertItem.id);
-                                          setReplyMessage('');
-                                        }}
-                                      >
-                                        {replyingTo === alertItem.id ? 'Cancel' : '💬 Reply'}
-                                      </button>
-                                      <button
-                                        className="text-xs bg-white border border-slate-200 shadow-sm px-4 py-2 rounded-xl text-slate-600 font-bold hover:bg-slate-50 disabled:opacity-50"
-                                        disabled={dismissAlertMutation.isPending}
-                                        onClick={() => dismissAlertMutation.mutate(alertItem.id)}
-                                      >
-                                        Mark Handled ✅
-                                      </button>
-                                    </div>
-                                  )}
-                                </td>
-                              </tr>
-                              {replyingTo === alertItem.id && !alertItem.isDismissed && (
-                                <tr className="bg-indigo-50/30">
-                                  <td colSpan={4} className="p-4">
-                                    <div className="flex gap-3 items-end">
-                                      <div className="flex-1">
-                                        <label className="block text-[10px] uppercase tracking-wider font-bold text-indigo-400 mb-1">
-                                          Your Response to {alertItem.customerPhone}
-                                        </label>
-                                        <textarea
-                                          className="w-full rounded-xl border border-indigo-100 p-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none shadow-sm"
-                                          placeholder="Type your reply here..."
-                                          rows={2}
-                                          value={replyMessage}
-                                          onChange={(e) => setReplyMessage(e.target.value)}
-                                        />
-                                      </div>
-                                      <button
-                                        className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold text-sm shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all disabled:opacity-50"
-                                        disabled={!replyMessage.trim() || replyMutation.isPending}
-                                        onClick={() => replyMutation.mutate({ 
-                                          customerPhone: alertItem.customerPhone, 
-                                          message: replyMessage 
-                                        })}
-                                      >
-                                        {replyMutation.isPending ? 'Sending...' : 'Send Message 🚀'}
-                                      </button>
-                                    </div>
-                                  </td>
-                                </tr>
+                    <div className="flex-1 overflow-y-auto divide-y divide-slate-50">
+                      {conversationsQuery.data?.length === 0 && (
+                        <div className="p-6 text-center text-slate-400 text-sm">No conversations yet</div>
+                      )}
+                      {conversationsQuery.data?.map((conv) => (
+                        <button
+                          key={conv.customerPhone}
+                          onClick={() => { setSelectedPhone(conv.customerPhone); setChatInput(''); }}
+                          className={`w-full text-left px-4 py-3 transition-all hover:bg-slate-50 relative ${
+                            selectedPhone === conv.customerPhone 
+                              ? 'bg-indigo-50 border-l-4 border-indigo-500' 
+                              : conv.unresolvedAlertCount > 0 
+                                ? 'bg-orange-50/60 border-l-4 border-orange-400' 
+                                : ''
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className={`text-sm truncate ${conv.unresolvedAlertCount > 0 ? 'font-extrabold text-orange-900' : 'font-bold text-ink'}`}>
+                              {conv.customerPhone}
+                            </span>
+                            <div className="flex items-center gap-1.5 flex-shrink-0">
+                              {conv.unresolvedAlertCount > 0 && (
+                                <span className="flex items-center gap-1 bg-orange-500 text-white text-[8px] font-bold px-1.5 py-0.5 rounded-full animate-bounce shadow-sm">
+                                  NEW
+                                </span>
                               )}
+                              <span className="text-[10px] text-slate-400">
+                                {new Date(conv.lastMessageAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </span>
                             </div>
-                          ))}
-                        </tbody>
-                      </table>
+                          </div>
+                          <div className="flex items-center gap-1 mt-0.5">
+                            <span className="text-[10px] text-slate-400">
+                              {conv.lastMessageSender === 'USER' ? '👤' : conv.lastMessageSender === 'BOT' ? '🤖' : '🧑‍🍳'}
+                            </span>
+                            <p className={`text-xs truncate ${conv.unresolvedAlertCount > 0 ? 'text-orange-700 font-medium' : 'text-slate-500'}`}>
+                              {conv.lastMessage}
+                            </p>
+                          </div>
+                        </button>
+                      ))}
                     </div>
                   </div>
-                )}
 
+                  {/* Right Panel: Chat Thread */}
+                  <div className="flex-1 flex flex-col min-w-0">
+                    {!selectedPhone ? (
+                      <div className="flex-1 flex flex-col items-center justify-center text-slate-300 gap-3">
+                        <span className="text-5xl">💬</span>
+                        <p className="text-sm font-medium">Select a conversation to view messages</p>
+                      </div>
+                    ) : (
+                      <>
+                        {/* Chat header */}
+                        <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+                          <div>
+                            <p className="font-bold text-sm text-ink">{selectedPhone}</p>
+                            <p className="text-[10px] text-slate-400">{chatHistoryQuery.data?.length ?? 0} messages</p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => setIsManualModalOpen(true)}
+                              className="text-[10px] font-bold bg-indigo-50 text-indigo-600 border border-indigo-100 px-3 py-1.5 rounded-lg hover:bg-indigo-100 transition-all"
+                            >
+                              📦 Manual Order
+                            </button>
+                            {(conversationsQuery.data?.find(c => c.customerPhone === selectedPhone)?.unresolvedAlertCount ?? 0) > 0 && (
+                              <button
+                                onClick={() => resolveConversationMutation.mutate(selectedPhone)}
+                                disabled={resolveConversationMutation.isPending}
+                                className="text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-100 px-3 py-1.5 rounded-lg hover:bg-emerald-100 transition-all disabled:opacity-50"
+                              >
+                                ✅ Resolve All
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Message bubbles */}
+                        <div className="flex-1 overflow-y-auto p-4 space-y-3" style={{ maxHeight: '360px' }}>
+                          {chatHistoryQuery.isLoading && (
+                            <div className="text-center text-slate-400 text-sm py-8">Loading messages...</div>
+                          )}
+                          {chatHistoryQuery.data?.map((msg) => {
+                            const isUser = msg.sender === 'USER';
+                            const isBot = msg.sender === 'BOT';
+                            const isSystem = msg.sender === 'SYSTEM';
+
+                            if (isSystem) {
+                              return (
+                                <div key={msg.id} className="flex justify-center my-4">
+                                  <div className="bg-orange-50 border border-orange-100 rounded-full px-4 py-1 flex items-center gap-2 shadow-sm">
+                                    <span className="text-[10px]">⚠️</span>
+                                    <span className="text-[11px] font-bold text-orange-700 tracking-tight uppercase">{msg.content}</span>
+                                    <span className="text-[9px] text-orange-400 font-medium">
+                                      {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                    </span>
+                                  </div>
+                                </div>
+                              );
+                            }
+
+                            return (
+                              <div key={msg.id} className={`flex ${isUser ? 'justify-start' : 'justify-end'}`}>
+                                <div className={`max-w-[75%]`}>
+                                  <div className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${
+                                    isUser
+                                      ? 'bg-slate-100 text-slate-800 rounded-tl-sm'
+                                      : isBot
+                                        ? 'bg-indigo-500 text-white rounded-tr-sm shadow-md'
+                                        : 'bg-emerald-500 text-white rounded-tr-sm shadow-md'
+                                  }`}>
+                                    {msg.content}
+                                  </div>
+                                  <div className={`flex items-center gap-1 mt-1 ${isUser ? 'justify-start' : 'justify-end'}`}>
+                                    <span className="text-[9px] font-bold uppercase tracking-tighter text-slate-400">
+                                      {isBot ? '🤖 Bot' : isUser ? '👤 Customer' : '🧑‍🍳 Staff'}
+                                    </span>
+                                    <span className="text-[9px] text-slate-300">·</span>
+                                    <span className="text-[9px] text-slate-400">
+                                      {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                          <div ref={chatBottomRef} />
+                        </div>
+
+                        {/* Reply box */}
+                        <div className="px-4 py-3 border-t border-slate-100 flex gap-2 items-end">
+                          <textarea
+                            className="flex-1 rounded-2xl border border-slate-200 px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-400 focus:border-transparent outline-none resize-none"
+                            placeholder={`Reply to ${selectedPhone}...`}
+                            rows={2}
+                            value={chatInput}
+                            onChange={(e) => setChatInput(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && !e.shiftKey && chatInput.trim()) {
+                                e.preventDefault();
+                                chatSendMutation.mutate({ customerPhone: selectedPhone, message: chatInput });
+                              }
+                            }}
+                          />
+                          <button
+                            className="bg-indigo-600 text-white px-4 py-2.5 rounded-2xl font-bold text-sm shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all disabled:opacity-40 flex-shrink-0"
+                            disabled={!chatInput.trim() || chatSendMutation.isPending}
+                            onClick={() => chatSendMutation.mutate({ customerPhone: selectedPhone, message: chatInput })}
+                          >
+                            {chatSendMutation.isPending ? '...' : '🚀 Send'}
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </article>
+
+              {/* ── Right column: Orders + Products ───────────────────── */}
+              <article className="rounded-[2rem] bg-white p-6 shadow-panel">
                 <div>
                   <h2 className="font-display text-3xl text-ink">Orders</h2>
                   <p className="mt-2 text-sm text-slate-500">Update status to trigger customer notifications and review collection.</p>
