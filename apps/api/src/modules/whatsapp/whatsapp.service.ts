@@ -470,10 +470,13 @@ export class WhatsAppService {
     if (cartRows.length > 0) finalSections.push({ title: 'Current Cart', rows: cartRows });
     if (entries.length > 0) finalSections.push({ title: 'Categories', rows: entries });
 
+    const baseUrl = this.configService.get<string>('APP_BASE_URL') ?? 'http://localhost:4000';
+    const menuUrl = `${baseUrl}/public/orders/menu/${tenantId}`;
+
     return {
       type: 'list',
       header: '🍱 *Menu Explorer*',
-      body: 'Select a category or proceed to checkout.',
+      body: `Select a category or checkout below.\n\n📖 *View Full Digital Menu*: \n${menuUrl}`,
       buttonLabel: 'Explore Menu',
       sections: finalSections
     };
@@ -541,8 +544,17 @@ export class WhatsAppService {
 
   private async handleCheckout(tenantId: string, customerPhone: string) {
     const order = await this.orderService.finalizeOrder(tenantId, customerPhone);
+    const baseUrl = this.configService.get<string>('APP_BASE_URL') ?? 'http://localhost:4000';
+    const invoiceUrl = `${baseUrl}/public/orders/invoice/${order.id}`;
+
     const prompt = await this.getTemplate(tenantId, 'ORDER_PAYMENT_PROMPT',
-      [`Great! Your order #${order.id.slice(-6).toUpperCase()} is received.`, `Total: ${formatInr(Number(order.totalAmount))}`, '', 'How would you like to pay?'].join('\n'));
+      [
+        `Great! Your order #${order.id.slice(-6).toUpperCase()} is received.`,
+        `Total: ${formatInr(Number(order.totalAmount))}`,
+        `🧾 *Invoice*: ${invoiceUrl}`,
+        '',
+        'How would you like to pay?'
+      ].join('\n'));
 
     return {
       type: 'buttons',
@@ -556,8 +568,13 @@ export class WhatsAppService {
 
   private async handleStatusCheck(tenantId: string, customerPhone: string) {
     const order = await this.orderService.getLatestOrderForCustomer(tenantId, customerPhone);
+    if (!order) return "You don't have any orders yet!";
+
+    const baseUrl = this.configService.get<string>('APP_BASE_URL') ?? 'http://localhost:4000';
+    const invoiceUrl = `${baseUrl}/public/orders/invoice/${order.id}`;
+
     return this.getTemplate(tenantId, 'ORDER_STATUS',
-      [`Latest order: {{id}}`, `Status: {{status}}`, `Total: {{total}}`].join('\n'),
+      [`Latest order: {{id}}`, `Status: {{status}}`, `Total: {{total}}`, `🧾 Invoice: ${invoiceUrl}`].join('\n'),
       { id: order.id, status: order.status, total: formatInr(Number(order.totalAmount)) });
   }
 

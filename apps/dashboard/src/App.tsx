@@ -1063,27 +1063,58 @@ export default function App() {
                         </div>
 
                         {/* Reply box */}
-                        <div className="px-4 py-3 border-t border-slate-100 flex gap-2 items-end">
-                          <textarea
-                            className="flex-1 rounded-2xl border border-slate-200 px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-400 focus:border-transparent outline-none resize-none"
-                            placeholder={`Reply to ${selectedPhone}...`}
-                            rows={2}
-                            value={chatInput}
-                            onChange={(e) => setChatInput(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' && !e.shiftKey && chatInput.trim()) {
-                                e.preventDefault();
-                                chatSendMutation.mutate({ customerPhone: selectedPhone, message: chatInput });
-                              }
-                            }}
-                          />
-                          <button
-                            className="bg-indigo-600 text-white px-4 py-2.5 rounded-2xl font-bold text-sm shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all disabled:opacity-40 flex-shrink-0"
-                            disabled={!chatInput.trim() || chatSendMutation.isPending}
-                            onClick={() => chatSendMutation.mutate({ customerPhone: selectedPhone, message: chatInput })}
-                          >
-                            {chatSendMutation.isPending ? '...' : '🚀 Send'}
-                          </button>
+                        <div className="px-4 py-3 border-t border-slate-100">
+                          <div className="flex gap-2 mb-2">
+                            <button
+                              onClick={() => {
+                                const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000';
+                                const url = `${baseUrl}/public/orders/menu/${currentUser?.tenantId}`;
+                                chatSendMutation.mutate({ customerPhone: selectedPhone, message: `📖 *Digital Menu*: ${url}` });
+                              }}
+                              disabled={chatSendMutation.isPending}
+                              className="text-[10px] font-bold bg-indigo-50 text-indigo-700 px-3 py-1.5 rounded-lg hover:bg-indigo-100 transition-all border border-indigo-100"
+                            >
+                              📖 Send Menu Link
+                            </button>
+                            <button
+                              onClick={() => {
+                                const latestOrder = ordersQuery.data?.find(o => o.customerPhone === selectedPhone);
+                                if (!latestOrder) {
+                                  toast.error('No orders found for this customer');
+                                  return;
+                                }
+                                const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000';
+                                const url = `${baseUrl}/public/orders/invoice/${latestOrder.id}`;
+                                chatSendMutation.mutate({ customerPhone: selectedPhone, message: `🧾 *Invoice*: ${url}` });
+                              }}
+                              disabled={chatSendMutation.isPending}
+                              className="text-[10px] font-bold bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-lg hover:bg-emerald-100 transition-all border border-emerald-100"
+                            >
+                              🧾 Send Latest Invoice
+                            </button>
+                          </div>
+                          <div className="flex gap-2 items-end">
+                            <textarea
+                              className="flex-1 rounded-2xl border border-slate-200 px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-400 focus:border-transparent outline-none resize-none"
+                              placeholder={`Reply to ${selectedPhone}...`}
+                              rows={2}
+                              value={chatInput}
+                              onChange={(e) => setChatInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' && !e.shiftKey && chatInput.trim()) {
+                                  e.preventDefault();
+                                  chatSendMutation.mutate({ customerPhone: selectedPhone, message: chatInput });
+                                }
+                              }}
+                            />
+                            <button
+                              className="bg-indigo-600 text-white px-4 py-2.5 rounded-2xl font-bold text-sm shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all disabled:opacity-40 flex-shrink-0"
+                              disabled={!chatInput.trim() || chatSendMutation.isPending}
+                              onClick={() => chatSendMutation.mutate({ customerPhone: selectedPhone, message: chatInput })}
+                            >
+                              {chatSendMutation.isPending ? '...' : '🚀 Send'}
+                            </button>
+                          </div>
                         </div>
                       </>
                     )}
@@ -1149,6 +1180,14 @@ export default function App() {
                                 >
                                   {replyingTo === order.id ? 'Close Chat' : '💬 Chat'}
                                 </button>
+                                <a
+                                  href={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000'}/public/orders/invoice/${order.id}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-[10px] font-bold px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 flex items-center gap-1"
+                                >
+                                  🧾 Invoice
+                                </a>
                                 <select
                                   className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold bg-white"
                                   value={order.status}

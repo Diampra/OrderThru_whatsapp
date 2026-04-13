@@ -6,12 +6,13 @@ import { WhatsAppModule } from '../whatsapp/whatsapp.module';
 import { EventsModule } from '../events/events.module';
 import { OrderController } from './order.controller';
 import { OrderService } from './order.service';
+import { InvoiceService } from './invoice.service';
 import { AbandonedCartService } from './abandoned-cart.service';
 
 @Module({
   imports: [ProductModule, PaymentModule, ReviewModule, forwardRef(() => WhatsAppModule), EventsModule],
   controllers: [OrderController],
-  providers: [OrderService, AbandonedCartService],
-  exports: [OrderService],
+  providers: [OrderService, AbandonedCartService, InvoiceService],
+  exports: [OrderService, InvoiceService],
 })
 export class OrderModule {}
