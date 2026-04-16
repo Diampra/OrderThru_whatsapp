@@ -7,8 +7,10 @@ import { WhatsAppService } from './whatsapp.service';
 import { WhatsAppSessionService } from './whatsapp-session.service';
 import { EventsModule } from '../events/events.module';
 
+import { WhatsappStickerModule } from '../whatsapp-sticker/whatsapp-sticker.module';
+
 @Module({
-  imports: [ProductModule, ReviewModule, EventsModule, forwardRef(() => OrderModule)],
+  imports: [ProductModule, ReviewModule, EventsModule, forwardRef(() => OrderModule), WhatsappStickerModule],
   controllers: [WhatsAppController],
   providers: [WhatsAppService, WhatsAppSessionService],
   exports: [WhatsAppService, WhatsAppSessionService],

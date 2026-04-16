@@ -1,0 +1,47 @@
+### ──────────────────────────────────────────────
+### WhatsApp Sticker Module — Test Requests
+### ──────────────────────────────────────────────
+### Replace {{variables}} with actual values before running.
+
+### ─── 1. Upload sticker (Super Admin) ──────────
+POST http://localhost:4000/whatsapp/stickers/upload
+Authorization: Bearer {{superAdminToken}}
+Content-Type: multipart/form-data; boundary=----boundary
+
+------boundary
+Content-Disposition: form-data; name="name"
+
+Happy Cat
+------boundary
+Content-Disposition: form-data; name="tags"
+
+funny
+------boundary
+Content-Disposition: form-data; name="tags"
+
+cat
+------boundary
+Content-Disposition: form-data; name="file"; filename="happy_cat.png"
+Content-Type: image/png
+
+< ./test-sticker.png
+------boundary--
+
+### ─── 2. List all stickers (Any Admin) ─────────
+GET http://localhost:4000/whatsapp/stickers
+Authorization: Bearer {{adminToken}}
+
+### ─── 3. Send sticker to WhatsApp (Tenant Admin) ───
+POST http://localhost:4000/whatsapp/stickers/send
+Authorization: Bearer {{tenantAdminToken}}
+Content-Type: application/json
+
+{
+  "phoneNumber": "919876543210",
+  "stickerId": "{{stickerId}}",
+  "consent": true
+}
+
+### ─── 4. Delete sticker (Super Admin) ──────────
+DELETE http://localhost:4000/whatsapp/stickers/{{stickerId}}
+Authorization: Bearer {{superAdminToken}}

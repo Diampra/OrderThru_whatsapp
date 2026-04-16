@@ -219,6 +219,30 @@ enum ReviewConversationState {
   WAITING_FOR_COMMENT
 }
 
+model Sticker {
+  id        String   @id @default(cuid())
+  name      String
+  category  String   @default("General")
+  tags      String[] @default([])
+  fileUrl   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model StickerMediaCache {
+  id        String   @id @default(cuid())
+  stickerId String   @map("sticker_id")
+  tenantId  String   @map("tenant_id")
+  mediaId   String   @map("media_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@unique([stickerId, tenantId])
+  @@index([stickerId])
+  @@index([tenantId])
+  @@map("sticker_media_cache")
+}
+
 enum OrderSource {
   BOT
   MANUAL

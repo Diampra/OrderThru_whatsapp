@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, Fragment, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { io } from 'socket.io-client';
-import { api, type DashboardSummary, type Product, type Order, type Review, type Role, type Tenant, type ProductSchemaItem, type StaffAlert, type ChatMessage, type Conversation, type SalesAnalytics } from './lib/api';
+import { api, type DashboardSummary, type Product, type Order, type Review, type Role, type Tenant, type ProductSchemaItem, type StaffAlert, type ChatMessage, type Conversation, type SalesAnalytics, type Sticker } from './lib/api';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid } from 'recharts';
 
 const statusOptions = ['PENDING', 'PREPARING', 'READY', 'COMPLETED'] as const;
@@ -59,6 +59,11 @@ export default function App() {
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [editingTenant, setEditingTenant] = useState<Tenant | null>(null);
   const [activeTab, setActiveTab]= useState<'dashboard' | 'analytics' | 'orders' | 'reviews' | 'pos' | 'settings'>('dashboard');
+  const [superAdminTab, setSuperAdminTab] = useState<'tenants' | 'stickers'>('tenants');
+  const [stickerForm, setStickerForm] = useState({ name: '', category: 'General', tags_raw: '' });
+  const [selectedStickerFile, setSelectedStickerFile] = useState<File | null>(null);
+  const [isStickerModalOpen, setIsStickerModalOpen] = useState(false);
+
   const [localSchema, setLocalSchema] = useState<ProductSchemaItem[]>([]);
   
   const [orderFilters, setOrderFilters] = useState({ status: '', startDate: '', endDate: '', phone: '' });
@@ -291,6 +296,46 @@ export default function App() {
     enabled: Boolean(token) && currentUser?.role === 'SUPER_ADMIN',
   });
 
+  const stickersQuery = useQuery({
+    queryKey: ['stickers'],
+    queryFn: async () => (await api.get<Sticker[]>('/whatsapp/stickers')).data,
+    enabled: Boolean(token),
+  });
+
+  const uploadStickerMutation = useMutation({
+    mutationFn: async () => {
+      const formData = new FormData();
+      formData.append('name', stickerForm.name);
+      formData.append('category', stickerForm.category);
+      stickerForm.tags_raw.split(',').map(t => t.trim()).filter(Boolean).forEach(tag => {
+        formData.append('tags', tag);
+      });
+      if (selectedStickerFile) {
+        formData.append('file', selectedStickerFile);
+      }
+      return api.post('/whatsapp/stickers/upload', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+    },
+    onSuccess: () => {
+      setStickerForm({ name: '', category: 'General', tags_raw: '' });
+      setSelectedStickerFile(null);
+      queryClient.invalidateQueries({ queryKey: ['stickers'] });
+      showToast('Sticker uploaded successfully! 📁');
+    },
+    onError: (err: any) => {
+      showToast(`Upload failed: ${err.response?.data?.message || err.message}`, 'error');
+    },
+  });
+
+  const deleteStickerMutation = useMutation({
+    mutationFn: async (id: string) => api.delete(`/whatsapp/stickers/${id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['stickers'] });
+      showToast('Sticker deleted successfully!');
+    },
+  });
+
   const reviewsQuery = useQuery({
     queryKey: ['reviews', reviewFilters],
     queryFn: async () => {
@@ -353,6 +398,18 @@ export default function App() {
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
     },
     onError: () => showToast('Failed to send message.', 'error'),
+  });
+
+  const sendStickerMutation = useMutation({
+    mutationFn: async ({ phoneNumber, stickerId }: { phoneNumber: string; stickerId: string }) =>
+      api.post('/whatsapp/stickers/send', { phoneNumber, stickerId, consent: true }),
+    onSuccess: () => {
+      setIsStickerModalOpen(false);
+      showToast('Sticker sent! 😀');
+    },
+    onError: (err: any) => {
+      showToast(`Failed to send sticker: ${err.response?.data?.message || err.message}`, 'error');
+    },
   });
 
   const resolveConversationMutation = useMutation({
@@ -528,8 +585,19 @@ export default function App() {
             <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
               <div>
                 <p className="text-sm uppercase tracking-[0.3em] text-indigo-200">System Control</p>
-                <h1 className="mt-4 font-display text-4xl">Super Admin Dashboard</h1>
-                <p className="mt-3 max-w-2xl text-white/70">Design the core data structure for every tenant in the network.</p>
+                <div className="flex flex-col gap-6">
+                  <h1 className="mt-4 font-display text-4xl">Super Admin Dashboard</h1>
+                  <nav className="flex gap-x-8 border-b border-white/10">
+                    <button 
+                      onClick={() => setSuperAdminTab('tenants')}
+                      className={`pb-4 text-sm font-medium transition-colors ${superAdminTab === 'tenants' ? 'text-white border-b-2 border-indigo-400' : 'text-white/40 hover:text-white/60'}`}
+                    >Active Tenants</button>
+                    <button 
+                      onClick={() => setSuperAdminTab('stickers')}
+                      className={`pb-4 text-sm font-medium transition-colors ${superAdminTab === 'stickers' ? 'text-white border-b-2 border-indigo-400' : 'text-white/40 hover:text-white/60'}`}
+                    >Global Stickers</button>
+                  </nav>
+                </div>
               </div>
               <button
                 className="rounded-full border border-white/20 px-5 py-3 text-sm text-white/80 transition hover:bg-white/10"
@@ -543,45 +611,207 @@ export default function App() {
             </div>
           </header>
 
-          <section className="mt-6 grid gap-6">
-            <article className="rounded-[2rem] bg-white p-6 shadow-panel">
-              <h2 className="font-display text-3xl text-ink">Active Tenants</h2>
-              <div className="mt-6 space-y-4">
-                {allTenantsQuery.data?.map(tenant => (
-                  <div key={tenant.id} className="rounded-3xl border border-slate-100 p-6 flex flex-col gap-4">
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <h3 className="font-display text-xl">{tenant.name}</h3>
-                        <p className="text-sm text-slate-500">ID: {tenant.id} | {tenant._count?.products} Products</p>
+          {superAdminTab === 'tenants' ? (
+            <section className="mt-6 grid gap-6">
+              <article className="rounded-[2rem] bg-white p-6 shadow-panel">
+                <h2 className="font-display text-3xl text-ink">Active Tenants</h2>
+                <div className="mt-6 space-y-4">
+                  {allTenantsQuery.data?.map(tenant => (
+                    <div key={tenant.id} className="rounded-3xl border border-slate-100 p-6 flex flex-col gap-4">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <h3 className="font-display text-xl">{tenant.name}</h3>
+                          <p className="text-sm text-slate-500">ID: {tenant.id} | {tenant._count?.products} Products</p>
+                        </div>
+                        <div className="flex gap-2">
+                           <button 
+                            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm transition-colors" 
+                            onClick={() => setEditingTenant(tenant)}
+                          >
+                             Manage Settings
+                           </button>
+                        </div>
                       </div>
-                      <div className="flex gap-2">
-                         <button 
-                          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm transition-colors" 
-                          onClick={() => setEditingTenant(tenant)}
-                        >
-                           Manage Settings
-                         </button>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="text-xs space-y-1">
+                          <p className="font-semibold text-slate-400 uppercase tracking-wider">WhatsApp Status</p>
+                          <p className={tenant.whatsappAccessToken ? 'text-green-600' : 'text-amber-600'}>
+                            {tenant.whatsappAccessToken ? '✓ Connected' : '⚠ Missing Credentials'}
+                          </p>
+                        </div>
+                        <div className="text-xs space-y-1">
+                          <p className="font-semibold text-slate-400 uppercase tracking-wider">Payment Status</p>
+                          <p className={tenant.razorpayKeyId ? 'text-indigo-600' : 'text-slate-400'}>
+                            {tenant.razorpayKeyId ? '✓ Razorpay Enabled' : 'Cash on Delivery'}
+                          </p>
+                        </div>
                       </div>
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div className="text-xs space-y-1">
-                        <p className="font-semibold text-slate-400 uppercase tracking-wider">WhatsApp Status</p>
-                        <p className={tenant.whatsappAccessToken ? 'text-green-600' : 'text-amber-600'}>
-                          {tenant.whatsappAccessToken ? '✓ Connected' : '⚠ Missing Credentials'}
-                        </p>
-                      </div>
-                      <div className="text-xs space-y-1">
-                        <p className="font-semibold text-slate-400 uppercase tracking-wider">Payment Status</p>
-                        <p className={tenant.razorpayKeyId ? 'text-indigo-600' : 'text-slate-400'}>
-                          {tenant.razorpayKeyId ? '✓ Razorpay Enabled' : 'Cash on Delivery'}
-                        </p>
-                      </div>
-                    </div>
+                  ))}
+                </div>
+              </article>
+            </section>
+          ) : (
+            <section className="mt-6 grid gap-6 xl:grid-cols-[1fr_2.5fr]">
+              {/* Sticker Upload Area */}
+              <article className="rounded-[2rem] bg-white p-6 shadow-panel h-fit">
+                <h2 className="font-display text-2xl text-ink">Upload Global Sticker</h2>
+                <p className="text-sm text-slate-500 mt-2 mb-6">PNGs will be automatically converted to 512x512 WEBP for WhatsApp.</p>
+                
+                <form 
+                  className="space-y-4"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (!selectedStickerFile) {
+                      showToast('Please select a PNG file', 'error');
+                      return;
+                    }
+                    if (!stickerForm.name) {
+                      showToast('Sticker name is required', 'error');
+                      return;
+                    }
+                    uploadStickerMutation.mutate();
+                  }}
+                >
+                  <label className="block">
+                    <span className="text-xs font-bold text-slate-400 uppercase ml-2 mb-1 block">Sticker Name</span>
+                    <input 
+                      className="w-full rounded-2xl border border-slate-200 px-4 py-3 outline-none focus:border-indigo-500 transition shadow-sm"
+                      placeholder="e.g. Happy Cat"
+                      value={stickerForm.name}
+                      onChange={(e) => setStickerForm(s => ({ ...s, name: e.target.value }))}
+                    />
+                  </label>
+
+                  <label className="block">
+                    <span className="text-xs font-bold text-slate-400 uppercase ml-2 mb-1 block">Category</span>
+                    <input 
+                      className="w-full rounded-2xl border border-slate-200 px-4 py-3 outline-none focus:border-indigo-500 transition shadow-sm"
+                      placeholder="e.g. Greetings, Memes, Reactions"
+                      value={stickerForm.category}
+                      onChange={(e) => setStickerForm(s => ({ ...s, category: e.target.value }))}
+                    />
+                  </label>
+
+                  <label className="block">
+                    <span className="text-xs font-bold text-slate-400 uppercase ml-2 mb-1 block">Tags (comma-separated)</span>
+                    <input 
+                      className="w-full rounded-2xl border border-slate-200 px-4 py-3 outline-none focus:border-indigo-500 transition shadow-sm"
+                      placeholder="funny, cat, animal"
+                      value={stickerForm.tags_raw}
+                      onChange={(e) => setStickerForm(s => ({ ...s, tags_raw: e.target.value }))}
+                    />
+                  </label>
+
+                  <div className="space-y-2">
+                    <span className="text-xs font-bold text-slate-400 uppercase ml-2 block">Source PNG</span>
+                    <label className="flex flex-col items-center justify-center p-8 border-2 border-dashed border-slate-200 rounded-2xl cursor-pointer hover:border-indigo-500 hover:bg-slate-50 transition-all text-center">
+                      {selectedStickerFile ? (
+                        <div className="space-y-2">
+                          <p className="text-indigo-600 font-bold text-sm">✓ {selectedStickerFile.name}</p>
+                          <p className="text-[10px] text-slate-400">Click to change</p>
+                        </div>
+                      ) : (
+                        <>
+                          <span className="text-3xl mb-2">📁</span>
+                          <span className="text-xs font-medium text-slate-500">Pick a high-quality PNG</span>
+                        </>
+                      )}
+                      <input 
+                        type="file" 
+                        accept="image/png" 
+                        className="hidden" 
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) {
+                            if (file.type !== 'image/png') {
+                              showToast('Only PNG images are accepted', 'error');
+                              return;
+                            }
+                            setSelectedStickerFile(file);
+                          }
+                        }}
+                      />
+                    </label>
                   </div>
-                ))}
-              </div>
-            </article>
-          </section>
+
+                  <button 
+                    type="submit" 
+                    disabled={uploadStickerMutation.isPending}
+                    className="w-full bg-indigo-600 text-white font-bold py-4 rounded-2xl shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all disabled:opacity-50"
+                  >
+                    {uploadStickerMutation.isPending ? 'Processing & Uploading...' : 'Add to Catalog'}
+                  </button>
+                </form>
+              </article>
+
+              {/* Sticker Grid Area */}
+              <article className="rounded-[2rem] bg-white p-6 shadow-panel">
+                 <div className="flex justify-between items-center mb-6">
+                    <h2 className="font-display text-2xl text-ink">Global Library</h2>
+                    <span className="text-xs font-bold text-slate-400 bg-slate-100 px-3 py-1 rounded-full">
+                      {stickersQuery.data?.length ?? 0} Stickers Available
+                    </span>
+                 </div>
+
+                 {stickersQuery.isLoading && (
+                   <div className="py-20 text-center text-slate-400 font-medium">Loading collection...</div>
+                 )}
+
+                 {Object.entries(
+                    (stickersQuery.data || []).reduce((acc: Record<string, Sticker[]>, sticker) => {
+                      if (!acc[sticker.category]) acc[sticker.category] = [];
+                      acc[sticker.category].push(sticker);
+                      return acc;
+                    }, {})
+                 ).map(([category, stickers]) => (
+                   <div key={category} className="mb-8">
+                     <h3 className="text-sm font-bold text-indigo-900 border-b border-indigo-100 pb-2 mb-4">{category}</h3>
+                     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                        {stickers.map(sticker => (
+                          <div key={sticker.id} className="group relative bg-slate-50 border border-slate-100 rounded-3xl p-3 hover:bg-indigo-50/50 hover:border-indigo-200 transition-all">
+                            <div className="aspect-square bg-white rounded-2xl overflow-hidden mb-3 border border-slate-100 flex items-center justify-center p-2">
+                              <img 
+                                src={sticker.fileUrl?.startsWith('http') ? sticker.fileUrl : `${api.defaults.baseURL}${sticker.fileUrl}`} 
+                                alt={sticker.name}
+                                className="w-full h-full object-contain group-hover:scale-110 transition-transform duration-500"
+                              />
+                            </div>
+                            <h3 className="text-xs font-bold text-ink truncate mb-1">{sticker.name}</h3>
+                            <div className="flex flex-wrap gap-1">
+                              {sticker.tags.slice(0, 2).map((tag: string) => (
+                                <span key={tag} className="text-[8px] font-bold bg-white text-slate-400 px-1.5 py-0.5 rounded border border-slate-100">
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+
+                            <button 
+                              onClick={() => {
+                                if (confirm('Delete this sticker from the global catalog?')) {
+                                  deleteStickerMutation.mutate(sticker.id);
+                                }
+                              }}
+                              className="absolute -top-2 -right-2 w-7 h-7 bg-white border border-slate-200 text-rose-500 rounded-full flex items-center justify-center text-xs opacity-0 group-hover:opacity-100 hover:bg-rose-50 hover:border-rose-200 transition-all shadow-sm z-10"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                     </div>
+                   </div>
+                 ))}
+
+                 {!stickersQuery.isLoading && stickersQuery.data?.length === 0 && (
+                   <div className="py-20 text-center">
+                      <p className="text-3xl mb-4">✨</p>
+                      <p className="text-sm font-medium text-slate-400">Your sticker collection is empty.</p>
+                      <p className="text-xs text-slate-300 mt-1">Upload PNGs on the left to start building your catalog.</p>
+                   </div>
+                 )}
+              </article>
+            </section>
+          )}
 
           {/* Tenant Settings Modal */}
           {editingTenant && (
@@ -1129,6 +1359,12 @@ export default function App() {
                               className="text-[10px] font-bold bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-lg hover:bg-emerald-100 transition-all border border-emerald-100"
                             >
                               🧾 Send Latest Invoice
+                            </button>
+                            <button
+                              onClick={() => setIsStickerModalOpen(true)}
+                              className="text-[10px] font-bold bg-amber-50 text-amber-700 px-3 py-1.5 rounded-lg hover:bg-amber-100 transition-all border border-amber-100"
+                            >
+                              😀 Browse Stickers
                             </button>
                           </div>
                           <div className="flex gap-2 items-end">
@@ -2099,6 +2335,88 @@ export default function App() {
         )}
         </div>
       </main>
+
+      {/* Tenant Sticker Browser Modal */}
+      {isStickerModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          {/* Backdrop with click-to-close */}
+          <div 
+            className="absolute inset-0 bg-indigo-950/40 backdrop-blur-sm" 
+            onClick={() => setIsStickerModalOpen(false)}
+          />
+          
+          <div className="relative w-full max-w-4xl max-h-[85vh] bg-white rounded-[2.5rem] shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="px-8 py-6 border-b border-slate-100 flex justify-between items-center bg-white z-10 sticky top-0">
+              <div>
+                <h2 className="font-display text-2xl text-ink">Browse Stickers</h2>
+                <p className="text-sm text-slate-500 mt-1">Tap a sticker to send directly to {selectedPhone}</p>
+              </div>
+              <button 
+                onClick={() => setIsStickerModalOpen(false)}
+                className="w-10 h-10 bg-slate-50 hover:bg-slate-100 rounded-full flex items-center justify-center text-slate-500 transition-colors"
+              >
+                ×
+              </button>
+            </div>
+            
+            <div className="p-8 overflow-y-auto scrollbar-hide flex-1 bg-slate-50/50">
+               {stickersQuery.isLoading && (
+                 <div className="py-20 text-center text-slate-400 font-medium">Loading collection...</div>
+               )}
+
+               {Object.entries(
+                  (stickersQuery.data || []).reduce((acc: Record<string, Sticker[]>, sticker) => {
+                    if (!acc[sticker.category]) acc[sticker.category] = [];
+                    acc[sticker.category].push(sticker);
+                    return acc;
+                  }, {})
+               ).map(([category, stickers]) => (
+                 <div key={category} className="mb-10 last:mb-0">
+                   <h3 className="text-lg font-bold text-indigo-900 border-b border-indigo-100 pb-3 mb-5 inline-block pr-8">{category}</h3>
+                   <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                      {stickers.map(sticker => (
+                        <div 
+                          key={sticker.id} 
+                          className="group relative bg-white border border-slate-100 rounded-3xl p-3 hover:border-indigo-400 hover:shadow-lg transition-all cursor-pointer flex flex-col items-center"
+                          onClick={() => {
+                            if (!selectedPhone) {
+                              showToast('Please select a conversation first', 'error');
+                              return;
+                            }
+                            sendStickerMutation.mutate({ phoneNumber: selectedPhone, stickerId: sticker.id });
+                          }}
+                        >
+                          <div className="aspect-square w-full rounded-2xl overflow-hidden mb-2 bg-slate-50 p-2">
+                            <img 
+                              src={sticker.fileUrl?.startsWith('http') ? sticker.fileUrl : `${api.defaults.baseURL}${sticker.fileUrl}`} 
+                              alt={sticker.name}
+                              className="w-full h-full object-contain group-hover:scale-110 transition-transform duration-300 drop-shadow-sm"
+                            />
+                          </div>
+                          <span className="text-[10px] font-bold text-slate-500 truncate w-full text-center group-hover:text-indigo-600 transition-colors">{sticker.name}</span>
+                          
+                          {/* Sending Overlay */}
+                          {sendStickerMutation.isPending && sendStickerMutation.variables?.stickerId === sticker.id && (
+                            <div className="absolute inset-0 bg-white/80 backdrop-blur-[2px] rounded-3xl flex items-center justify-center">
+                              <div className="w-6 h-6 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                   </div>
+                 </div>
+               ))}
+
+               {!stickersQuery.isLoading && stickersQuery.data?.length === 0 && (
+                 <div className="py-20 text-center">
+                    <p className="text-4xl mb-4">👻</p>
+                    <p className="text-slate-500 font-medium">No stickers available.</p>
+                 </div>
+               )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Toast Notifications */}
       {toast && (

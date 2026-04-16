@@ -10,6 +10,7 @@ import { ProductService } from '../product/product.service';
 import { ReviewService } from '../review/review.service';
 import { WhatsAppSessionService } from './whatsapp-session.service';
 import { EventsGateway } from '../events/events.gateway';
+import { WhatsappStickerService } from '../whatsapp-sticker/whatsapp-sticker.service';
 import { extractFoodName } from './food-keywords';
 
 @Injectable()
@@ -23,6 +24,7 @@ export class WhatsAppService {
     private readonly reviewService: ReviewService,
     private readonly sessionService: WhatsAppSessionService,
     private readonly eventsGateway: EventsGateway,
+    private readonly stickerService: WhatsappStickerService,
     @Inject(forwardRef(() => OrderService)) private readonly orderService: OrderService,
   ) { }
 
@@ -323,6 +325,23 @@ export class WhatsAppService {
     }
     else if (['human', 'staff', 'agent', 'call', 'talk', 'speak', 'help', 'HUMAN'].includes(lowerText)) {
       return this.escalateToHuman(tenantId, customerPhone, "User requested human help.");
+    }
+    else if (lowerText === 'sticker' || lowerText === 'stickers') {
+      const stickers = await this.prisma.sticker.findMany();
+      if (stickers.length > 0) {
+        const randomSticker = stickers[Math.floor(Math.random() * stickers.length)];
+        try {
+          await this.stickerService.sendSticker(
+            { phoneNumber: customerPhone, stickerId: randomSticker.id, consent: true },
+            tenantId
+          );
+        } catch (e: any) {
+          this.logger.error('Failed to auto-send sticker', e);
+        }
+        return; // Early return prevents text fallback
+      } else {
+        response = "Sorry, we don't have any fun stickers right now! 😅";
+      }
     }
     else if (['menu', 'start', 'hi', 'hello', 'MAIN_MENU'].includes(lowerText)) {
       response = await this.showMainMenu(tenantId, customerPhone);

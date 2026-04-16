@@ -142,3 +142,12 @@ export type SalesAnalytics = {
   date: string;
   sales: number;
 };
+
+export type Sticker = {
+  id: string;
+  name: string;
+  category: string;
+  fileUrl: string;
+  tags: string[];
+  createdAt: string;
+};
